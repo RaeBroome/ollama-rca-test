@@ -6,8 +6,10 @@ RCAEval-data/ is read-only. Nothing in this module writes files.
 CLI:  python rca_lib.py inspect <case> [--no-artifacts] [--max-pat-rows N]
 """
 import csv
+import json
 import os
 import re
+import time
 import warnings
 from collections import Counter
 from functools import lru_cache
@@ -701,7 +703,9 @@ def count_tokens(text, model="qwen"):
 # message.content: gemma4:26b returned an empty answer with num_predict 80-100. PROVISIONAL - the thinking
 # reserve was set from a trivial prompt (195 tokens) and should be re-measured on real step-0 prompts.
 ANSWER_RESERVE = {"default": 1024, "qwen2.5-coder:7b": 1024, "gemma4:26b": 1024}
-THINKING_EXTRA = 2048
+# Measured on step-1 prompts: gemma4:26b spent ~6000 thinking chars (~2000 tokens) before answering, so 2048 was
+# not enough - it hit the limit with empty content. 4096 leaves room for thinking plus the answer.
+THINKING_EXTRA = 4096
 
 
 def answer_reserve_for(model=None, thinking=False):
@@ -738,6 +742,297 @@ def check_prompt_eval(expected_tokens, prompt_eval_count, tolerance=0.1):
         return False, f"possible truncation: prompt_eval_count={prompt_eval_count} < expected ~{expected_tokens}"
     return True, "ok"
 
+
+
+# ============================================================ step 1: anomaly / symptom detection
+# One output shape for every version, so configurations are interchangeable:
+#   symptoms  : case, source, service, signal, kind, strength, onset_s, size, size_num, artifact_flag, reason
+#   candidates: case, source, rank, service, reason, n_signals, first_onset_s, has_clear, artifact_only
+#   meta      : dict (versions, config, model, thinking, tokens, timings, free GPU, failures)
+# kinds: shape | presence | error_rate | log_new | log_vanished | log_rate | quiet | log_oneoff | log_rare
+STEP1_VERSION = "step1-v0.1"
+SYMPTOM_COLS = ["case", "source", "service", "signal", "kind", "strength", "onset_s", "size", "size_num",
+                "artifact_flag", "reason"]
+CANDIDATE_COLS = ["case", "source", "rank", "service", "reason", "n_signals", "first_onset_s", "has_clear",
+                  "artifact_only"]
+SIZE_CAP = 1000.0  # fold changes from a ~0 baseline are unbounded; cap them so one formula artifact can't dominate
+
+
+def _ratio(pre, post):
+    if pre and post:
+        return max(post / pre, pre / post)
+    return SIZE_CAP if post else 1.0
+
+
+def step1_symptoms(case, source="python", include_artifacts=True):
+    """Normalise the step-0 evidence into symptom rows. Same evidence as render_step0, no ranking."""
+    rows = []
+    met, _ = step0_metrics(case)
+    for x in met.itertuples():
+        if not include_artifacts and x.artifact_flag:
+            continue
+        ev = x.evidence
+        kind = "error_rate" if "sparse_rate_rise" in ev else ("presence" if x.presence else "shape")
+        fold = float(x.fold) if x.fold is not None and not pd.isna(x.fold) else 1.0
+        rows.append({"service": x.service, "signal": f"{x.service}_{x.metric}", "kind": kind,
+                     "strength": "clear" if x.clear else "weak",
+                     "onset_s": None if x.reached_s is None or pd.isna(x.reached_s) else float(x.reached_s),
+                     "size": _fmt_size(x.fold) + (f" ({x.presence})" if x.presence else "") + (f" errors {x.errors_nonzero}" if x.errors_nonzero else ""),
+                     "size_num": min(fold, SIZE_CAP), "artifact_flag": x.artifact_flag,
+                     "reason": _plain_evidence(ev)})
+
+    if bool(case_info(case)["has_logs"]):
+        pats, oneoffs, rare, rare_other, vol, _ = step0_logs(case)
+        kind_map = {"new": "log_new", "vanished": "log_vanished", "rate_change": "log_rate", "rate_change_weak": "log_rate"}
+        for x in pats.itertuples():
+            rows.append({"service": x.container_name, "signal": _cut(x.tmpl, 120, x.example), "kind": kind_map[x.kind],
+                         "strength": "weak" if x.kind == "rate_change_weak" else "clear",
+                         "onset_s": None if pd.isna(x.first_after_s) or x.post < x.pre else float(x.first_after_s),
+                         "size": f"{x.pre}->{x.post}", "size_num": min(_ratio(x.pre, x.post), SIZE_CAP),
+                         "artifact_flag": "", "reason": f"log pattern {x.kind}"})
+        for c, v in vol.iterrows():
+            if not pd.isna(v.quiet_from_s):
+                rows.append({"service": c, "signal": f"{c} log volume", "kind": "quiet", "strength": "clear",
+                             "onset_s": float(v.quiet_from_s),
+                             "size": f"{v.per_min_pre:g}->{v.per_min_post:g} lines/min",
+                             "size_num": min(_ratio(v.per_min_pre, v.per_min_post), SIZE_CAP), "artifact_flag": "",
+                             "reason": f"log volume quiet {int(v.quiet_from_s)}s-{int(v.quiet_until_s)}s"})
+        for groups, kind in [(oneoffs, "log_oneoff"), (rare, "log_rare")]:
+            for c, grp in groups.items():
+                classes = exception_classes(" ".join(str(m) for m in grp.example))
+                rows.append({"service": c, "signal": f"{len(grp)} {kind} lines" + (f" [classes: {', '.join(classes)}]" if classes else ""),
+                             "kind": kind, "strength": "clear" if classes else "weak",
+                             "onset_s": float(grp.first_after_s.min()), "size": f"{len(grp)} patterns",
+                             "size_num": float(len(grp)), "artifact_flag": "",
+                             "reason": f"{kind} between {int(grp.first_after_s.min())}s-{int(grp.last_after_s.max())}s"})
+    df = pd.DataFrame(rows, columns=[c for c in SYMPTOM_COLS if c not in ("case", "source")])
+    df.insert(0, "source", source)
+    df.insert(0, "case", case)
+    return df
+
+
+def rank_candidates(symptoms, order="strength"):
+    """order: strength (clear first, then size, one row per service before seconds) | onset (earliest first) | none."""
+    s = symptoms.copy()
+    if order == "strength":
+        s["_clear"] = (s.strength == "clear").astype(int)
+        s = s.sort_values(["_clear", "size_num"], ascending=[False, False])
+        s["_r"] = s.groupby("service").cumcount()
+        s = s.sort_values(["_r", "_clear", "size_num"], ascending=[True, False, False]).drop(columns=["_r", "_clear"])
+    elif order == "onset":
+        s = s.sort_values("onset_s", na_position="last", kind="stable")
+    cands = []
+    for svc in dict.fromkeys(s.service):
+        g = s[s.service == svc]
+        top = g.head(2)
+        cands.append({"service": svc, "reason": "; ".join(f"{x.kind} {x.signal[:60]} ({x.size})" for x in top.itertuples()),
+                      "n_signals": len(g), "first_onset_s": g.onset_s.min(),
+                      "has_clear": bool((g.strength == "clear").any()),
+                      "artifact_only": bool((g.artifact_flag != "").all())})
+    out = pd.DataFrame(cands)
+    out.insert(0, "rank", range(1, len(out) + 1))
+    out.insert(0, "source", symptoms.source.iloc[0] if len(symptoms) else "")
+    out.insert(0, "case", symptoms.case.iloc[0] if len(symptoms) else "")
+    return out[CANDIDATE_COLS], s.reset_index(drop=True)
+
+
+def step1_python(case, order="strength", include_artifacts=True):
+    t0 = time.time()
+    sym = step1_symptoms(case, source=f"python:{order}", include_artifacts=include_artifacts)
+    cands, sym = rank_candidates(sym, order=order)
+    return {"candidates": cands, "symptoms": sym,
+            "meta": {"case": case, "source": f"python:{order}", "step1_version": STEP1_VERSION,
+                     "step0_version": STEP0_VERSION, "thresholds_version": THRESHOLDS_VERSION,
+                     "include_artifacts": include_artifacts, "wall_s": round(time.time() - t0, 2)}}
+
+
+STEP1_INSTRUCTIONS = """You are analysing telemetry from a microservice system. A fault started at t=0.
+
+Below is a summary of everything that changed after t=0, for every service. Nothing in it is ranked by importance.
+
+Your task is SYMPTOM DETECTION, not a final verdict: list the changes that look like real symptoms, and rank the
+services that deserve investigation. A service showing a symptom may be a victim of another service's fault.
+
+Answer with JSON only, no other text, in exactly this shape:
+{"symptoms": [{"service": "<name>", "signal": "<copy the metric or log pattern from the evidence>",
+               "kind": "shape|presence|error_rate|log_new|log_vanished|log_rate|quiet",
+               "first_seen_s": <number or null>, "strength": "clear|weak", "why": "<one short sentence>"}],
+ "candidates": [{"service": "<name>", "why": "<one short sentence: why investigate this service>"}]}
+
+Rules: use only service names from the list of services given below; order "candidates" most suspicious first;
+include at most 8 symptoms and at most 5 candidates; copy signal names from the evidence rather than inventing them.
+
+EVIDENCE:
+"""
+
+
+@lru_cache(maxsize=None)
+def model_supports_thinking(model):
+    """Ollama rejects `think` with HTTP 400 on models without the capability (e.g. qwen2.5-coder:7b)."""
+    import urllib.request
+    req = urllib.request.Request("http://127.0.0.1:11434/api/show", data=json.dumps({"model": model}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        return "thinking" in json.loads(urllib.request.urlopen(req, timeout=120).read()).get("capabilities", [])
+    except Exception:
+        return False
+
+
+def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout=1800, schema=None):
+    """One chat call at temperature 0. Records free GPU memory before the call (see gpu_memory_mb) and checks
+    prompt_eval_count for silent truncation. Answers come from message.content only, never thinking.
+    `thinking` is ignored (and recorded as unsupported) for models without the thinking capability."""
+    import urllib.request
+    gpu_before = gpu_memory_mb()
+    supported = model_supports_thinking(model)
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False,
+            "keep_alive": "5m", "options": {"num_ctx": num_ctx, "temperature": 0, "num_predict": num_predict}}
+    if supported:
+        body["think"] = thinking
+    if schema is not None:  # Ollama structured output: without it qwen copies the table's "-" into numeric fields
+        body["format"] = schema
+    req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    t0 = time.time()
+    r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    wall = time.time() - t0
+    msg = r.get("message", {})
+    expected = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
+    ok, note = check_prompt_eval(expected, r.get("prompt_eval_count"))
+    return {"content": msg.get("content") or "", "thinking_chars": len(msg.get("thinking") or ""),
+            "meta": {"model": model, "thinking": thinking and supported,
+                     "thinking_supported": supported, "num_ctx": num_ctx, "wall_s": round(wall, 2),
+                     "prompt_tokens_expected": expected, "prompt_eval_count": r.get("prompt_eval_count"),
+                     "eval_count": r.get("eval_count"), "done_reason": r.get("done_reason"),
+                     "truncation_ok": ok, "truncation_note": note,
+                     "gpu_free_before_MB": gpu_before[0] if gpu_before else None,
+                     "gpu_total_MB": gpu_before[2] if gpu_before else None}}
+
+
+def _parse_json_block(text):
+    t = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    i, j = t.find("{"), t.rfind("}")
+    if i < 0 or j < 0:
+        raise ValueError("no JSON object in response")
+    return json.loads(t[i:j + 1])
+
+
+STEP1_SCHEMA = {  # Ollama structured output, so a malformed number can't cost a whole run
+    "type": "object",
+    "properties": {
+        "symptoms": {"type": "array", "items": {"type": "object", "properties": {
+            "service": {"type": "string"}, "signal": {"type": "string"}, "kind": {"type": "string"},
+            "first_seen_s": {"type": ["number", "null"]}, "strength": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["service", "signal", "kind", "strength", "why"]}},
+        "candidates": {"type": "array", "items": {"type": "object", "properties": {
+            "service": {"type": "string"}, "why": {"type": "string"}}, "required": ["service", "why"]}},
+    },
+    "required": ["symptoms", "candidates"],
+}
+
+
+def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=True, max_pat_rows=None,
+              num_predict=None, schema=STEP1_SCHEMA):
+    """LLM symptom detection on the step-0 text. Same output shape as step1_python.
+    Services are validated against the case's own service list; invented names are recorded, not silently kept."""
+    thinking = thinking and model_supports_thinking(model)  # qwen2.5-coder has no thinking capability
+    evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows)
+    prompt = STEP1_INSTRUCTIONS + evidence
+    services = set(step0_metrics(case)[1])
+    n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
+    num_ctx = num_ctx_for(n_tok, model, thinking)
+    source = f"llm:{model}{'-think' if thinking else '-nothink'}"
+
+    attempts, data, err = [], None, None
+    if num_predict is None:
+        num_predict = answer_reserve_for(model, thinking)
+    for attempt in range(2):
+        r = ollama_chat(model, prompt, num_ctx, thinking=thinking, num_predict=num_predict, schema=schema)
+        attempts.append(r["meta"] | {"thinking_chars": r["thinking_chars"], "content_chars": len(r["content"])})
+        try:
+            data = _parse_json_block(r["content"])
+            break
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    meta = {"case": case, "source": source, "step1_version": STEP1_VERSION, "step0_version": STEP0_VERSION,
+            "include_artifacts": include_artifacts, "evidence_tokens": count_tokens(evidence, "qwen" if "qwen" in model else "gemma"),
+            "prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None,
+            "n_attempts": len(attempts)}
+    if data is None:
+        empty_s = pd.DataFrame(columns=SYMPTOM_COLS)
+        empty_c = pd.DataFrame(columns=CANDIDATE_COLS)
+        return {"candidates": empty_c, "symptoms": empty_s, "meta": meta}
+
+    sym_rows, unknown = [], []
+    for s in data.get("symptoms", [])[:20]:
+        svc = str(s.get("service", ""))
+        if svc not in services:
+            unknown.append(svc)
+        sym_rows.append({"case": case, "source": source, "service": svc, "signal": str(s.get("signal", ""))[:160],
+                         "kind": str(s.get("kind", "")), "strength": str(s.get("strength", "")),
+                         "onset_s": s.get("first_seen_s"), "size": "", "size_num": np.nan,
+                         "artifact_flag": "", "reason": str(s.get("why", ""))[:200]})
+    sym = pd.DataFrame(sym_rows, columns=SYMPTOM_COLS)
+    cand_rows = []
+    for i, c in enumerate(data.get("candidates", [])[:10], start=1):
+        svc = str(c.get("service", ""))
+        if svc not in services:
+            unknown.append(svc)
+        g = sym[sym.service == svc]
+        cand_rows.append({"case": case, "source": source, "rank": i, "service": svc,
+                          "reason": str(c.get("why", ""))[:300],  # the model's STATED reason, kept verbatim
+                          "n_signals": len(g), "first_onset_s": pd.to_numeric(g.onset_s, errors="coerce").min(),
+                          "has_clear": bool((g.strength == "clear").any()), "artifact_only": False})
+    meta["unknown_services"] = sorted(set(unknown))
+    return {"candidates": pd.DataFrame(cand_rows, columns=CANDIDATE_COLS), "symptoms": sym, "meta": meta}
+
+
+# Hand-check expectations: subtle evidence each case must still carry after step 1 (from explore.ipynb parts B/C).
+RETENTION_CHECKS = {
+    "re3ss_carts_f1_1": [("carts WARN 'POST not supported'", "carts", "not supported"),
+                         ("carts goes quiet (restart)", "carts", "log volume"),
+                         ("carts error-seconds rise", "carts", "carts_error")],
+    "re3ss_orders_f3_1": [("orders INFO 'payment response: null'", "orders", "payment response: null"),
+                          ("front-end 'Not Acceptable' orders", "front-end", "Not Acceptable"),
+                          ("orders error-seconds rise", "orders", "orders_error")],
+    "re2ss_user_loss_1": [("user latency goes quiet", "user", "user_latency"),
+                          ("user error metric appears", "user", "user_error"),
+                          ("user log volume quiet", "user", "log volume")],
+}
+
+
+def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
+    """One-screen hand-check sheet per case. Ground truth is shown for the human; it is never in the model input."""
+    r = case_info(case)
+    truth = r["root_cause_service"]
+    out = [f"=== {case} | truth: {truth} | fault {r['fault']} ({r['dataset']})"]
+    for res in results:
+        c, s, meta = res["candidates"], res["symptoms"], res["meta"]
+        src = meta["source"]
+        top = list(c.service.head(top_n))
+        pos = (list(c.service).index(truth) + 1) if truth in list(c.service) else None
+        louder = [x for x in top[:pos - 1]] if pos else top
+        line = f"  [{src}] top{top_n}: {', '.join(top) if top else '(none)'}"
+        out.append(line)
+        out.append(f"      truth rank: {pos if pos else 'ABSENT'}" + (f" | ranked above truth: {', '.join(louder)}" if louder else "")
+                   + (f" | parse_error: {meta['parse_error']}" if meta.get("parse_error") else "")
+                   + (f" | invented services: {meta['unknown_services']}" if meta.get("unknown_services") else ""))
+        if truth in list(c.service):
+            why = c[c.service == truth].reason.iloc[0]
+            out.append(f"      stated reason for {truth}: {why[:220]}")
+        # retention: is each expected subtle signal still present in this version's symptoms?
+        got = []
+        for label, svc, needle in checks.get(case, []):
+            hit = s[(s.service == svc) & s.signal.str.contains(needle, case=False, regex=False, na=False)]
+            got.append(("KEPT " if len(hit) else "LOST ") + label)
+        if got:
+            out.append("      retention: " + " | ".join(got))
+        if meta.get("attempts"):
+            a = meta["attempts"][-1]
+            out.append(f"      cost: {a['prompt_eval_count']} prompt tok, {a['eval_count']} eval tok, "
+                       f"{a['thinking_chars']} thinking chars, {a['wall_s']}s, num_ctx {a['num_ctx']}, "
+                       f"gpu free before {a['gpu_free_before_MB']} MB, truncation_ok {a['truncation_ok']}")
+    return "\n".join(out)
 
 # ============================================================ CLI (used by the inspect-case skill)
 def inspect_case(case, include_artifacts=True, max_pat_rows=None):
