@@ -474,6 +474,7 @@ def step0_metrics(case, m=None):
         fold = ev.get("log2_fold", np.nan)
         rows.append({
             "service": svc, "metric": kind, "evidence": ev["evidence"],
+            "z": abs(ev.get("total_z", np.nan)),  # significance, used for ranking; not shown in the step-0 text
             "dir": "" if pd.isna(fold) else ("up" if fold > 0 else "down"),
             "fold": None if pd.isna(fold) else round(2 ** abs(fold), 2),
             "reached_s": ev.get("time_to_plateau_s"),
@@ -755,13 +756,20 @@ SYMPTOM_COLS = ["case", "source", "service", "signal", "kind", "strength", "onse
                 "artifact_flag", "reason"]
 CANDIDATE_COLS = ["case", "source", "rank", "service", "reason", "n_signals", "first_onset_s", "has_clear",
                   "artifact_only"]
-SIZE_CAP = 1000.0  # fold changes from a ~0 baseline are unbounded; cap them so one formula artifact can't dominate
+SIZE_CAP = 1000.0  # cap, so one unbounded value can't dominate a ranking
 
 
 def _ratio(pre, post):
     if pre and post:
         return max(post / pre, pre / post)
     return SIZE_CAP if post else 1.0
+
+
+def poisson_z(pre_count, post_count, pre_s, post_s):
+    """Significance of a count change: how far the observed count is from what the normal-period rate predicts,
+    in sqrt(expected) units. The log-side equivalent of a metric's total_z. Ranking only."""
+    expected = (pre_count or 0) * (post_s / pre_s if pre_s else 1)
+    return min(abs((post_count or 0) - expected) / max(expected, 1.0) ** 0.5, SIZE_CAP)
 
 
 def step1_symptoms(case, source="python", include_artifacts=True):
@@ -774,28 +782,32 @@ def step1_symptoms(case, source="python", include_artifacts=True):
         ev = x.evidence
         kind = "error_rate" if "sparse_rate_rise" in ev else ("presence" if x.presence else "shape")
         fold = float(x.fold) if x.fold is not None and not pd.isna(x.fold) else 1.0
+        z = float(x.z) if not pd.isna(x.z) else 0.0  # rank by significance: a ~0 baseline makes fold unbounded
         rows.append({"service": x.service, "signal": f"{x.service}_{x.metric}", "kind": kind,
                      "strength": "clear" if x.clear else "weak",
                      "onset_s": None if x.reached_s is None or pd.isna(x.reached_s) else float(x.reached_s),
                      "size": _fmt_size(x.fold) + (f" ({x.presence})" if x.presence else "") + (f" errors {x.errors_nonzero}" if x.errors_nonzero else ""),
-                     "size_num": min(fold, SIZE_CAP), "artifact_flag": x.artifact_flag,
+                     "size_num": min(z, SIZE_CAP), "artifact_flag": x.artifact_flag,
                      "reason": _plain_evidence(ev)})
 
     if bool(case_info(case)["has_logs"]):
         pats, oneoffs, rare, rare_other, vol, _ = step0_logs(case)
+        info = case_info(case)
+        pre_s, post_s = float(info["normal_timesteps"]), float(info["faulty_timesteps"])
         kind_map = {"new": "log_new", "vanished": "log_vanished", "rate_change": "log_rate", "rate_change_weak": "log_rate"}
         for x in pats.itertuples():
             rows.append({"service": x.container_name, "signal": _cut(x.tmpl, 120, x.example), "kind": kind_map[x.kind],
                          "strength": "weak" if x.kind == "rate_change_weak" else "clear",
                          "onset_s": None if pd.isna(x.first_after_s) or x.post < x.pre else float(x.first_after_s),
-                         "size": f"{x.pre}->{x.post}", "size_num": min(_ratio(x.pre, x.post), SIZE_CAP),
+                         "size": f"{x.pre}->{x.post}", "size_num": poisson_z(x.pre, x.post, pre_s, post_s),
                          "artifact_flag": "", "reason": f"log pattern {x.kind}"})
         for c, v in vol.iterrows():
             if not pd.isna(v.quiet_from_s):
                 rows.append({"service": c, "signal": f"{c} log volume", "kind": "quiet", "strength": "clear",
                              "onset_s": float(v.quiet_from_s),
                              "size": f"{v.per_min_pre:g}->{v.per_min_post:g} lines/min",
-                             "size_num": min(_ratio(v.per_min_pre, v.per_min_post), SIZE_CAP), "artifact_flag": "",
+                             "size_num": poisson_z(v.per_min_pre * pre_s / 60, v.per_min_post * post_s / 60, pre_s, post_s),
+                             "artifact_flag": "",
                              "reason": f"log volume quiet {int(v.quiet_from_s)}s-{int(v.quiet_until_s)}s"})
         for groups, kind in [(oneoffs, "log_oneoff"), (rare, "log_rare")]:
             for c, grp in groups.items():
@@ -803,7 +815,7 @@ def step1_symptoms(case, source="python", include_artifacts=True):
                 rows.append({"service": c, "signal": f"{len(grp)} {kind} lines" + (f" [classes: {', '.join(classes)}]" if classes else ""),
                              "kind": kind, "strength": "clear" if classes else "weak",
                              "onset_s": float(grp.first_after_s.min()), "size": f"{len(grp)} patterns",
-                             "size_num": float(len(grp)), "artifact_flag": "",
+                             "size_num": poisson_z(0, len(grp), pre_s, post_s), "artifact_flag": "",
                              "reason": f"{kind} between {int(grp.first_after_s.min())}s-{int(grp.last_after_s.max())}s"})
     df = pd.DataFrame(rows, columns=[c for c in SYMPTOM_COLS if c not in ("case", "source")])
     df.insert(0, "source", source)
@@ -988,16 +1000,18 @@ def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=T
 
 
 # Hand-check expectations: subtle evidence each case must still carry after step 1 (from explore.ipynb parts B/C).
+# (label, service, accepted kinds, accepted keywords) - a hit needs the service plus either the kind or a
+# keyword, because each arm phrases the same signal differently (the model rewrites signal names).
 RETENTION_CHECKS = {
-    "re3ss_carts_f1_1": [("carts WARN 'POST not supported'", "carts", "not supported"),
-                         ("carts goes quiet (restart)", "carts", "log volume"),
-                         ("carts error-seconds rise", "carts", "carts_error")],
-    "re3ss_orders_f3_1": [("orders INFO 'payment response: null'", "orders", "payment response: null"),
-                          ("front-end 'Not Acceptable' orders", "front-end", "Not Acceptable"),
-                          ("orders error-seconds rise", "orders", "orders_error")],
-    "re2ss_user_loss_1": [("user latency goes quiet", "user", "user_latency"),
-                          ("user error metric appears", "user", "user_error"),
-                          ("user log volume quiet", "user", "log volume")],
+    "re3ss_carts_f1_1": [("carts WARN 'POST not supported'", "carts", {"log_new"}, ["not supported", "pagenotfound", "warn"]),
+                         ("carts goes quiet (restart)", "carts", {"quiet"}, ["log volume", "quiet", "restart"]),
+                         ("carts error-seconds rise", "carts", {"error_rate"}, ["error"])],
+    "re3ss_orders_f3_1": [("orders INFO 'payment response: null'", "orders", {"log_new"}, ["payment response", "null"]),
+                          ("front-end 'Not Acceptable' orders", "front-end", {"log_new", "log_rate"}, ["not acceptable", "406"]),
+                          ("orders error-seconds rise", "orders", {"error_rate"}, ["error"])],
+    "re2ss_user_loss_1": [("user latency goes quiet", "user", {"presence", "shape"}, ["latency", "quiet"]),
+                          ("user error metric appears", "user", {"error_rate", "presence"}, ["error"]),
+                          ("user log volume quiet", "user", {"quiet"}, ["log volume", "quiet"])],
 }
 
 
@@ -1022,9 +1036,12 @@ def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
             out.append(f"      stated reason for {truth}: {why[:220]}")
         # retention: is each expected subtle signal still present in this version's symptoms?
         got = []
-        for label, svc, needle in checks.get(case, []):
-            hit = s[(s.service == svc) & s.signal.str.contains(needle, case=False, regex=False, na=False)]
-            got.append(("KEPT " if len(hit) else "LOST ") + label)
+        text = (s.signal.fillna("") + " " + s.reason.fillna("")).str.lower()
+        for label, svc, kinds, words in checks.get(case, []):
+            same_svc = s.service == svc
+            by_kind = same_svc & s.kind.isin(kinds)
+            by_word = same_svc & text.apply(lambda t: any(w in t for w in words))
+            got.append(("KEPT " if bool((by_kind | by_word).any()) else "LOST ") + label)
         if got:
             out.append("      retention: " + " | ".join(got))
         if meta.get("attempts"):
