@@ -878,6 +878,31 @@ EVIDENCE:
 """
 
 
+def ollama_unload(model):
+    """Free a model's VRAM. Call this for OTHER models BEFORE a run: with a second model still resident the
+    first call is slow and may spill to CPU (both of ours cannot fit on a 20 GB card at once)."""
+    import urllib.request
+    body = {"model": model, "prompt": "hi", "stream": False, "keep_alive": 0, "options": {"num_predict": 1}}
+    req = urllib.request.Request("http://127.0.0.1:11434/api/generate", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=600).read()
+
+
+def ollama_loaded():
+    import urllib.request
+    try:
+        return [m["name"] for m in json.loads(urllib.request.urlopen("http://127.0.0.1:11434/api/ps", timeout=60).read()).get("models", [])]
+    except Exception:
+        return []
+
+
+def ensure_only(model, others=("qwen2.5-coder:7b", "gemma4:26b")):
+    """Unload every other known model before running `model`."""
+    for m in others:
+        if m != model:
+            ollama_unload(m)
+
+
 @lru_cache(maxsize=None)
 def model_supports_thinking(model):
     """Ollama rejects `think` with HTTP 400 on models without the capability (e.g. qwen2.5-coder:7b)."""
@@ -1015,6 +1040,31 @@ RETENTION_CHECKS = {
 }
 
 
+def auto_retention_checks(case, n=3):
+    """Checklist derived from the TRUE root cause's own evidence, for cases without a hand-written one.
+    Validation only - never part of a model prompt. Prefers the signals the earlier analysis showed are easy
+    to lose: presence changes, error-rate rises, new log patterns, then the strongest metric shift."""
+    r = case_info(case)
+    svc = r["root_cause_service"]
+    sym = step1_symptoms(case)
+    own = sym[sym.service == svc]
+    picks, seen = [], set()
+    for kind, label, words in [("presence", "presence change", ["presence", "quiet", "appear"]),
+                               ("error_rate", "error-rate rise", ["error"]),
+                               ("log_new", "new log pattern", ["new"]),
+                               ("quiet", "log volume quiet", ["log volume", "quiet"]),
+                               ("log_rate", "log rate change", ["rate"]),
+                               ("shape", "metric shift", [])]:
+        g = own[own.kind == kind]
+        if len(g) and kind not in seen:
+            top = g.sort_values("size_num", ascending=False).iloc[0]
+            picks.append((f"{svc} {label} ({top.signal[:40]})", svc, {kind}, words))
+            seen.add(kind)
+        if len(picks) >= n:
+            break
+    return picks
+
+
 def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
     """One-screen hand-check sheet per case. Ground truth is shown for the human; it is never in the model input."""
     r = case_info(case)
@@ -1037,7 +1087,8 @@ def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
         # retention: is each expected subtle signal still present in this version's symptoms?
         got = []
         text = (s.signal.fillna("") + " " + s.reason.fillna("")).str.lower()
-        for label, svc, kinds, words in checks.get(case, []):
+        case_checks = checks.get(case) or auto_retention_checks(case)
+        for label, svc, kinds, words in case_checks:
             same_svc = s.service == svc
             by_kind = same_svc & s.kind.isin(kinds)
             by_word = same_svc & text.apply(lambda t: any(w in t for w in words))
