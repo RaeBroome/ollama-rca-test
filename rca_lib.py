@@ -773,6 +773,9 @@ def check_prompt_eval(expected_tokens, prompt_eval_count, tolerance=0.1):
 #   meta      : dict (versions, config, model, thinking, tokens, timings, free GPU, failures)
 # kinds: shape | presence | error_rate | log_new | log_vanished | log_rate | quiet | log_oneoff | log_rare
 STEP1_VERSION = "step1-v0.1"
+# Service order in the step-0 text is shuffled by default for scoring: alphabetical order is not neutral
+# (Sock Shop "carts" sorts first and is often the truth; "user" sorts last). The seed is recorded per run.
+DEFAULT_ORDER_SEED = 1234
 SYMPTOM_COLS = ["case", "source", "service", "signal", "kind", "strength", "onset_s", "size", "size_num",
                 "artifact_flag", "reason"]
 CANDIDATE_COLS = ["case", "source", "rank", "service", "reason", "n_signals", "first_onset_s", "has_clear",
@@ -990,7 +993,7 @@ STEP1_SCHEMA = {  # Ollama structured output, so a malformed number can't cost a
 
 
 def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=True, max_pat_rows=None,
-              num_predict=None, schema=STEP1_SCHEMA, order_seed=None):
+              num_predict=None, schema=STEP1_SCHEMA, order_seed=DEFAULT_ORDER_SEED):
     """LLM symptom detection on the step-0 text. Same output shape as step1_python.
     Services are validated against the case's own service list; invented names are recorded, not silently kept."""
     thinking = thinking and model_supports_thinking(model)  # qwen2.5-coder has no thinking capability
@@ -1164,10 +1167,11 @@ def inspect_case(case, include_artifacts=True, max_pat_rows=None):
         rc = read_root_cause(case)
         lines += ["", f"## root_cause.txt (at {rc['ts'] - t:+d}s): [{rc['container']}] {rc['message'][:200]}"]
 
-    txt = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows)
+    txt = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
+                       order_seed=DEFAULT_ORDER_SEED)  # what a scoring run actually sends
     q, g = count_tokens(txt, "qwen"), count_tokens(txt, "gemma")
     leaks = [s for s in [case, r["fault"] + "_", "root_cause", "ground truth"] if s in txt]
-    lines += ["", f"## Step 0 text ({STEP0_VERSION}): qwen {q} tokens (exact), gemma4 ~{g} (approx.) -> "
+    lines += ["", f"## Step 0 text ({STEP0_VERSION}, service order shuffled with seed {DEFAULT_ORDER_SEED}): qwen {q} tokens (exact), gemma4 ~{g} (approx.) -> "
                   f"num_ctx >= {num_ctx_for(max(q, g))} (evidence only; recompute with the full prompt); "
                   f"leak check: {leaks or 'none'}", "", txt]
     return "\n".join(lines)
