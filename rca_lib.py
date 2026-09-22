@@ -1128,6 +1128,318 @@ def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
                        f"gpu free before {a['gpu_free_before_MB']} MB, truncation_ok {a['truncation_ok']}")
     return "\n".join(out)
 
+
+# ============================================================ step 2: symptom -> origin (tracing)
+# Step 2 sees ONLY step 1's output plus a dependency block (decided), so step 1's retention differences stay
+# visible. Output is the step 1 shape plus role / path / direction_evidence.
+STEP2_VERSION = "step2-v0.1"
+STEP2_CAND_COLS = CANDIDATE_COLS + ["role", "path", "direction_evidence", "topology_only"]
+
+# A datastore whose only symptoms are connection/socket churn is NOT treated as an origin by the "rule" arm:
+# when a service is redeployed its database logs mass connection churn, which made carts-db look like the
+# deepest failing node in re3ss_carts_f1_1 (the wrong answer the naive rule gives).
+CHURN_WORDS = ["connection", "socket", "conn", "端"]
+CHURN_KINDS = {"quiet", "log_oneoff", "log_rare"}
+
+
+def _is_churn_only(symptoms):
+    """True when a service's symptoms are only connection/socket churn or log-volume noise."""
+    if not len(symptoms):
+        return False
+    for x in symptoms.itertuples():
+        sig = f"{x.signal} {x.reason}".lower()
+        churn = ("socket" in sig) or any(w in sig for w in CHURN_WORDS) or x.kind in CHURN_KINDS
+        if not churn:
+            return False  # something substantive (cpu/mem/latency/error/new pattern)
+    return True
+
+
+def trace_graph(case, inject_time=None):
+    """Per-case edges and per-service exclusive latency from traces. Returns (edges_df, exclusive_df)."""
+    t = load_inject_time(case) if inject_time is None else inject_time
+    tr = pd.read_parquet(f"{DATA_DIR}/{case}/traces.parquet",
+                         columns=["traceID", "spanID", "parentSpanID", "serviceName", "startTime", "duration", "statusCode"])
+    tr["after"] = (tr.startTime / 1e6) >= t
+    parent = tr[["spanID", "serviceName"]].rename(columns={"spanID": "parentSpanID", "serviceName": "caller"})
+    j = tr.merge(parent, on="parentSpanID")
+    j = j[j.caller != j.serviceName]
+    edges = (j.groupby(["caller", "serviceName", "after"])
+             .agg(calls=("spanID", "size"), err_rate=("statusCode", lambda s: float((s != 0).mean())),
+                  median_ms=("duration", lambda d: float(d.median()) / 1000.0)).reset_index())
+    # exclusive (self) latency: a span's duration minus the time its children took
+    child_sum = j.groupby(["parentSpanID", "after"]).duration.sum().rename("child_us").reset_index()
+    sp = tr.merge(child_sum.rename(columns={"parentSpanID": "spanID"}), on=["spanID", "after"], how="left")
+    sp["child_us"] = sp.child_us.fillna(0)
+    sp["exclusive_us"] = (sp.duration - sp.child_us).clip(lower=0)
+    excl = sp.groupby(["serviceName", "after"]).exclusive_us.median().rename("exclusive_us").reset_index()
+    return edges, excl
+
+
+def log_graph(case):
+    """Edges from one service's logs naming another (URLs, hosts, connection strings). Sock Shop has no
+    traces, so this is the only per-case evidence of who calls whom there."""
+    L = load_logs(case)
+    svcs = sorted(set(L.container_name))
+    pats = {s: re.compile(rf"(?<![\w-]){re.escape(s)}(?![\w-])") for s in svcs}
+    rows = Counter()
+    for c, msg, rel in zip(L.container_name, L.message.fillna(""), L.rel):
+        for s, rx in pats.items():
+            if s != c and rx.search(msg):
+                rows[(c, s, rel >= 0)] += 1
+    return pd.DataFrame([{"caller": a, "serviceName": b, "after": aft, "mentions": n}
+                         for (a, b, aft), n in rows.items()])
+
+
+def case_call_graph(case):
+    """Merged graph with per-edge provenance. provenance: trace | log | static | topology.
+    per_case_evidence is False for static/topology edges - results that hinge on those are flagged."""
+    info = case_info(case)
+    system = info["system"]
+    rows = []
+    if bool(info["has_traces"]):
+        edges, excl = trace_graph(case)
+        wide = edges.pivot_table(index=["caller", "serviceName"], columns="after",
+                                 values=["calls", "err_rate", "median_ms"]).reset_index()
+        for _, e in wide.iterrows():
+            get = lambda k, a: e.get((k, a), np.nan)
+            rows.append({"caller": e["caller"].iloc[0] if hasattr(e["caller"], "iloc") else e["caller"],
+                         "callee": e["serviceName"].iloc[0] if hasattr(e["serviceName"], "iloc") else e["serviceName"],
+                         "provenance": "trace", "per_case_evidence": True,
+                         "calls_pre": get("calls", False), "calls_post": get("calls", True),
+                         "err_pre": get("err_rate", False), "err_post": get("err_rate", True),
+                         "ms_pre": get("median_ms", False), "ms_post": get("median_ms", True)})
+    else:
+        excl = pd.DataFrame(columns=["serviceName", "after", "exclusive_us"])
+    if bool(info["has_logs"]):
+        lg = log_graph(case)
+        if len(lg):
+            wide = lg.pivot_table(index=["caller", "serviceName"], columns="after", values="mentions").reset_index()
+            for _, e in wide.iterrows():
+                rows.append({"caller": e["caller"], "callee": e["serviceName"], "provenance": "log",
+                             "per_case_evidence": True,
+                             "mentions_pre": e.get(False, np.nan), "mentions_post": e.get(True, np.nan)})
+    have = {(r["caller"], r["callee"]) for r in rows}
+    for a, b in STATIC_EDGES.get(system, set()):
+        if (a, b) not in have:
+            rows.append({"caller": a, "callee": b, "provenance": "static", "per_case_evidence": False})
+            have.add((a, b))
+    if not bool(info["has_traces"]):  # RE1: reuse the same system's topology from RE2/RE3 traces
+        for a, b in _trace_edges_for(system):
+            if (a, b) not in have:
+                rows.append({"caller": a, "callee": b, "provenance": "topology", "per_case_evidence": False})
+                have.add((a, b))
+    g = pd.DataFrame(rows)
+    return g, excl
+
+
+def _edge_note(e):
+    if e.get("provenance") == "trace":
+        bits = []
+        if not pd.isna(e.get("err_post")) and (e.get("err_post") or 0) > (e.get("err_pre") or 0):
+            bits.append(f"errors {e['err_pre']:.0%}->{e['err_post']:.0%}")
+        if not pd.isna(e.get("ms_post")):
+            bits.append(f"{e['ms_pre']:.0f}->{e['ms_post']:.0f} ms")
+        if not pd.isna(e.get("calls_post")):
+            bits.append(f"{int(e['calls_pre'] or 0)}->{int(e['calls_post'] or 0)} calls")
+        return ", ".join(bits) or "trace edge"
+    if e.get("provenance") == "log":
+        num = lambda v: 0 if v is None or pd.isna(v) else int(v)  # an edge seen only on one side gives NaN
+        return f"log mentions {num(e.get('mentions_pre'))}->{num(e.get('mentions_post'))}"
+    return "architecture only, no per-case evidence"
+
+
+def step2_dependency_block(case, candidates, graph, excl, max_services=8):
+    """Compact per-candidate dependency context: callers, callees, per-edge change, provenance."""
+    out = ["== DEPENDENCIES of the candidate services (who calls whom) ==",
+           "Edges marked 'architecture only' have no evidence in this case's own data."]
+    for svc in list(candidates.service)[:max_services]:
+        callees = graph[graph.caller == svc] if len(graph) else graph
+        callers = graph[graph.callee == svc] if len(graph) else graph
+        def fmt(df, col):
+            return "; ".join(f"{r[col]} ({r['provenance']}: {_edge_note(r)})" for _, r in df.iterrows()) or "(none known)"
+        out.append(f"{svc}: calls -> {fmt(callees, 'callee')}")
+        out.append(f"{svc}: called by <- {fmt(callers, 'caller')}")
+    if len(excl):
+        w = excl.pivot_table(index="serviceName", columns="after", values="exclusive_us")
+        lines = []
+        for svc in list(candidates.service)[:max_services]:
+            if svc in w.index:
+                pre, post = w.loc[svc].get(False, np.nan), w.loc[svc].get(True, np.nan)
+                if not pd.isna(pre) and not pd.isna(post):
+                    lines.append(f"{svc} {pre/1000:.1f}->{post/1000:.1f} ms")
+        if lines:
+            out.append("Own (exclusive) time per request, excluding time spent waiting for dependencies: " + "; ".join(lines))
+    return "\n".join(out)
+
+
+def step2_python(case, step1_result, rule="rule"):
+    """rule='naive': a service is an origin if no dependency of it is symptomatic (deepest failing node).
+    rule='rule':  same, but a dependency whose symptoms are ONLY connection/socket churn does not count -
+                  a redeployed service makes its datastore log connection churn (see CHURN_WORDS)."""
+    t0 = time.time()
+    cands, syms = step1_result["candidates"].copy(), step1_result["symptoms"]
+    graph, excl = case_call_graph(case)
+    symptomatic = set(cands.service)
+
+    def counts_as_symptomatic(svc):
+        if svc not in symptomatic:
+            return False
+        if rule == "naive":
+            return True
+        return not _is_churn_only(syms[syms.service == svc])
+
+    rows = []
+    for x in cands.itertuples():
+        callees = list(graph[graph.caller == x.service].callee) if len(graph) else []
+        sym_callees = [c for c in callees if counts_as_symptomatic(c)]
+        deciding = graph[(graph.caller == x.service) & (graph.callee.isin(sym_callees))] if sym_callees else graph.iloc[0:0]
+        topology_only = bool(len(deciding)) and not bool(deciding.per_case_evidence.any())
+        role = "victim" if sym_callees else "origin"
+        path = " -> ".join([x.service] + sym_callees[:2]) if sym_callees else x.service
+        ev = (f"symptomatic dependencies: {', '.join(sym_callees[:3])}" if sym_callees
+              else ("no symptomatic dependency" + (f" (deps: {', '.join(callees[:3])})" if callees else " (no known dependencies)")))
+        rows.append({**{c: getattr(x, c) for c in CANDIDATE_COLS if c != "rank"},
+                     "rank": x.rank, "role": role, "path": path, "direction_evidence": ev,
+                     "topology_only": topology_only})
+    out = pd.DataFrame(rows, columns=STEP2_CAND_COLS)
+    # origins first, keeping step 1's order inside each group, so step 2's effect is isolated
+    out = out.sort_values(["role", "rank"], key=lambda c: c.map({"origin": 0, "victim": 1}) if c.name == "role" else c)
+    out["rank"] = range(1, len(out) + 1)
+    out["source"] = f"{step1_result['meta']['source']}+py2:{rule}"
+    return {"candidates": out.reset_index(drop=True), "symptoms": syms,
+            "meta": {"case": case, "source": out.source.iloc[0] if len(out) else f"py2:{rule}",
+                     "step2_version": STEP2_VERSION, "rule": rule, "step1_source": step1_result["meta"]["source"],
+                     "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0,
+                     "wall_s": round(time.time() - t0, 2)}}
+
+
+STEP2_INSTRUCTIONS = """A fault started at t=0 in a microservice system. Symptom detection has already run.
+
+Below are the candidate services with their symptoms, and a dependency block showing who calls whom.
+
+Your task: decide which service is the ORIGIN of the fault and which are VICTIMS. A service that calls a
+broken dependency shows symptoms too (errors, latency, retries), but it is a victim, not the origin.
+Beware the reverse trap: when a service restarts or fails, its datastore logs connection churn - that
+does not make the datastore the origin.
+
+Answer with JSON only:
+{"origins": [{"service": "<name>", "why": "<one sentence>", "path": "<victim -> ... -> origin, or the service alone>"}],
+ "victims": [{"service": "<name>", "of_service": "<which dependency it is a victim of>", "why": "<one sentence>"}]}
+
+Use only service names from the candidates below; order "origins" most likely first; at most 3 origins.
+
+"""
+
+STEP2_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "origins": {"type": "array", "items": {"type": "object", "properties": {
+            "service": {"type": "string"}, "why": {"type": "string"}, "path": {"type": "string"}},
+            "required": ["service", "why"]}},
+        "victims": {"type": "array", "items": {"type": "object", "properties": {
+            "service": {"type": "string"}, "of_service": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["service", "why"]}},
+    },
+    "required": ["origins", "victims"],
+}
+
+
+def step2_llm(case, step1_result, model="qwen2.5-coder:7b", thinking=False, num_predict=None):
+    """Same inputs as step2_python (step 1 output + dependency block only), same output shape."""
+    cands, syms = step1_result["candidates"], step1_result["symptoms"]
+    graph, excl = case_call_graph(case)
+    lines = ["== CANDIDATE SERVICES from symptom detection (in the order symptom detection ranked them) =="]
+    for x in cands.itertuples():
+        own = syms[syms.service == x.service]
+        sig = "; ".join(f"{s.kind} {s.signal[:60]}" for s in own.head(3).itertuples()) or "(no detail)"
+        lines.append(f"{x.service}: {str(x.reason)[:160]} | symptoms: {sig}")
+    prompt = STEP2_INSTRUCTIONS + "\n".join(lines) + "\n\n" + step2_dependency_block(case, cands, graph, excl)
+    services = set(cands.service)
+    thinking = thinking and model_supports_thinking(model)
+    n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
+    if num_predict is None:
+        num_predict = answer_reserve_for(model, thinking)
+    source = f"{step1_result['meta']['source']}+llm2:{model}"
+
+    attempts, data, err = [], None, None
+    for _ in range(2):
+        r = ollama_chat(model, prompt, num_ctx_for(n_tok, model, thinking), thinking=thinking,
+                        num_predict=num_predict, schema=STEP2_SCHEMA)
+        attempts.append(r["meta"] | {"thinking_chars": r["thinking_chars"], "content_chars": len(r["content"])})
+        try:
+            data = _parse_json_block(r["content"])
+            break
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    meta = {"case": case, "source": source, "step2_version": STEP2_VERSION, "step1_source": step1_result["meta"]["source"],
+            "prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None,
+            "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0}
+    if data is None:
+        return {"candidates": pd.DataFrame(columns=STEP2_CAND_COLS), "symptoms": syms, "meta": meta}
+
+    unknown, rows, seen = [], [], set()
+    for o in data.get("origins", [])[:5]:
+        svc = str(o.get("service", ""))
+        if svc not in services:
+            unknown.append(svc)
+        seen.add(svc)
+        base = cands[cands.service == svc]
+        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": svc,
+                     "reason": str(o.get("why", ""))[:300],
+                     "n_signals": int(base.n_signals.iloc[0]) if len(base) else 0,
+                     "first_onset_s": base.first_onset_s.iloc[0] if len(base) else np.nan,
+                     "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
+                     "role": "origin", "path": str(o.get("path", ""))[:120],
+                     "direction_evidence": "model judgement", "topology_only": False})
+    for v in data.get("victims", [])[:10]:
+        svc = str(v.get("service", ""))
+        if svc not in services:
+            unknown.append(svc)
+        if svc in seen:
+            continue
+        seen.add(svc)
+        base = cands[cands.service == svc]
+        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": svc,
+                     "reason": str(v.get("why", ""))[:300],
+                     "n_signals": int(base.n_signals.iloc[0]) if len(base) else 0,
+                     "first_onset_s": base.first_onset_s.iloc[0] if len(base) else np.nan,
+                     "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
+                     "role": "victim", "path": f"{svc} -> {v.get('of_service', '?')}",
+                     "direction_evidence": "model judgement", "topology_only": False})
+    meta["unknown_services"] = sorted(set(unknown))
+    return {"candidates": pd.DataFrame(rows, columns=STEP2_CAND_COLS), "symptoms": syms, "meta": meta}
+
+
+def step2_sheet(case, step1_result, step2_results, known_victims=()):
+    """Rank before vs after step 2, plus role/path and whether known victims were demoted."""
+    truth = case_info(case)["root_cause_service"]
+    before = list(step1_result["candidates"].service)
+    r0 = before.index(truth) + 1 if truth in before else None
+    out = [f"=== {case} | truth: {truth} | step 1 [{step1_result['meta']['source']}] rank {r0 or 'ABSENT'}: {', '.join(before[:5])}"]
+    for res in step2_results:
+        c, meta = res["candidates"], res["meta"]
+        names = list(c.service)
+        r1 = names.index(truth) + 1 if truth in names else None
+        move = "=" if r0 == r1 else ("better" if (r1 or 99) < (r0 or 99) else "worse")
+        out.append(f"  [{meta['source']}] rank {r1 or 'ABSENT'} ({move}): {', '.join(names[:5])}")
+        if truth in names:
+            row = c[c.service == truth].iloc[0]
+            out.append(f"      role={row.role} path={row.path} | {str(row.direction_evidence)[:110]}"
+                       + (" | TOPOLOGY-ONLY EDGE" if row.topology_only else ""))
+        for v in known_victims:
+            if v in names:
+                vr = c[c.service == v].iloc[0]
+                out.append(f"      known victim {v}: rank {names.index(v) + 1}, role={vr.role}")
+        if meta.get("parse_error"):
+            out.append(f"      parse_error: {meta['parse_error']}")
+        if meta.get("attempts"):
+            a = meta["attempts"][-1]
+            out.append(f"      cost: {a['prompt_eval_count']} prompt tok, {a['eval_count']} eval tok, {a['wall_s']}s, "
+                       f"gpu free {a['gpu_free_before_MB']} MB")
+        if meta.get("edges_without_case_evidence"):
+            out.append(f"      graph: {meta['graph_edges']} edges, {meta['edges_without_case_evidence']} without per-case evidence")
+    return "\n".join(out)
+
 # ============================================================ CLI (used by the inspect-case skill)
 def inspect_case(case, include_artifacts=True, max_pat_rows=None):
     """Human-facing report for one case: labels, exclusions, evidence on the true root cause, and the
