@@ -371,6 +371,14 @@ def template(msg):
     return msg.strip()
 
 
+# Keys whose VALUE is always kept, however rare. kv_vocab only keeps pairs seen >= min_count times, which on a
+# sparse container (carts-db: 81 lines) keeps nothing - and masking these destroyed signals our own step-2 rules
+# needed ("msg":"connection accepted" -> "msg":"<v>", so the connection-churn rule could never fire).
+ALWAYS_KEEP_KEYS = {"msg", "error", "exception", "result", "method", "reason", "err", "level", "severity",
+                    "c", "s", "ctx", "status", "statuscode", "code", "caller", "op", "event"}
+# 3-digit status codes inside JSON/key=value are kept too (the "METHOD /path 500" rule only covers access logs)
+_STATUS_KV = re.compile(r'''(?i)(status|statuscode|code)("?\s*[:=]\s*"?)(\d{3})''')
+
 _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
 _EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 _KV = re.compile(r"\b([A-Za-z_][\w-]*)=(\"[^\"]*\"|[^\s,;]+)")
@@ -393,8 +401,10 @@ def template_v2(msg, vocab):
         return "<null message>"
     msg = _UUID.sub("<uuid>", msg)
     msg = _EMAIL.sub("<email>", msg)
-    msg = _KV.sub(lambda m: m.group(0) if (m.group(1), m.group(2)) in vocab else f"{m.group(1)}=<v>", msg)
-    msg = _JSONKV.sub(lambda m: m.group(0) if (m.group(1), m.group(2)) in vocab else f'"{m.group(1)}":"<v>"', msg)
+    msg = _STATUS_KV.sub(lambda m: f"{m.group(1)}{m.group(2)}status{m.group(3)}", msg)
+    keep = lambda k, v: (k, v) in vocab or k.lower() in ALWAYS_KEEP_KEYS
+    msg = _KV.sub(lambda m: m.group(0) if keep(m.group(1), m.group(2)) else f"{m.group(1)}=<v>", msg)
+    msg = _JSONKV.sub(lambda m: m.group(0) if keep(m.group(1), m.group(2)) else f'"{m.group(1)}":"<v>"', msg)
     return template(msg)
 
 
@@ -1190,6 +1200,43 @@ def log_graph(case):
                          for (a, b, aft), n in rows.items()])
 
 
+# Asynchronous work has no caller->callee line in logs or traces: shipping publishes to rabbitmq and
+# queue-master consumes. Without these edges a consumer looks like a service with no dependencies, and the
+# "deepest failing node" rule crowns it the origin (it did, in re3ss_orders_f3_1).
+QUEUE_PRODUCER = re.compile(r"(?i)\b(adding|publish\w*|sending|sent|enqueue\w*|added)\b[^.]{0,40}\b(to\s+)?queue\b|\bqueue\b[^.]{0,20}\b(task|message|shipment)\b")
+QUEUE_CONSUMER = re.compile(r"(?i)\breceived\b[^.]{0,30}\b(task|message|shipment)\b|\bconsum\w+\b[^.]{0,30}\b(task|message|queue)\b")
+BROKERS = ("rabbitmq", "kafka", "redis", "queue")
+
+
+def queue_edges(case, min_lines=3):
+    """producer -> broker -> consumer edges inferred from log phrasing, with the broker named when one of the
+    system's services looks like one. Evidence is per-case (the phrases come from this case's own logs)."""
+    L = load_logs(case)
+    svcs = sorted(set(L.container_name))
+    broker = next((s for s in svcs if any(b in s for b in BROKERS)), None)
+    prod = Counter()
+    cons = Counter()
+    for c, msg in zip(L.container_name, L.message.fillna("")):
+        if QUEUE_PRODUCER.search(msg):
+            prod[c] += 1
+        elif QUEUE_CONSUMER.search(msg):
+            cons[c] += 1
+    rows = []
+    for p_svc, n in prod.items():
+        for c_svc, m in cons.items():
+            if p_svc == c_svc or n < min_lines or m < min_lines:
+                continue
+            if broker and broker not in (p_svc, c_svc):
+                rows.append({"caller": p_svc, "callee": broker, "provenance": "log-queue", "per_case_evidence": True,
+                             "queue_lines": n})
+                rows.append({"caller": broker, "callee": c_svc, "provenance": "log-queue", "per_case_evidence": True,
+                             "queue_lines": m})
+            else:
+                rows.append({"caller": p_svc, "callee": c_svc, "provenance": "log-queue", "per_case_evidence": True,
+                             "queue_lines": min(n, m)})
+    return pd.DataFrame(rows).drop_duplicates(subset=["caller", "callee"]) if rows else pd.DataFrame()
+
+
 def case_call_graph(case):
     """Merged graph with per-edge provenance. provenance: trace | log | static | topology.
     per_case_evidence is False for static/topology edges - results that hinge on those are flagged."""
@@ -1218,6 +1265,9 @@ def case_call_graph(case):
                 rows.append({"caller": e["caller"], "callee": e["serviceName"], "provenance": "log",
                              "per_case_evidence": True,
                              "mentions_pre": e.get(False, np.nan), "mentions_post": e.get(True, np.nan)})
+    if bool(info["has_logs"]):
+        q = queue_edges(case)
+        rows += [r for _, r in q.iterrows()] if len(q) else []
     have = {(r["caller"], r["callee"]) for r in rows}
     for a, b in STATIC_EDGES.get(system, set()):
         if (a, b) not in have:
@@ -1242,6 +1292,8 @@ def _edge_note(e):
         if not pd.isna(e.get("calls_post")):
             bits.append(f"{int(e['calls_pre'] or 0)}->{int(e['calls_post'] or 0)} calls")
         return ", ".join(bits) or "trace edge"
+    if e.get("provenance") == "log-queue":
+        return f"asynchronous queue, {int(e.get('queue_lines') or 0)} log lines"
     if e.get("provenance") == "log":
         num = lambda v: 0 if v is None or pd.isna(v) else int(v)  # an edge seen only on one side gives NaN
         return f"log mentions {num(e.get('mentions_pre'))}->{num(e.get('mentions_post'))}"
@@ -1294,16 +1346,23 @@ def step2_python(case, step1_result, rule="rule"):
         sym_callees = [c for c in callees if counts_as_symptomatic(c)]
         deciding = graph[(graph.caller == x.service) & (graph.callee.isin(sym_callees))] if sym_callees else graph.iloc[0:0]
         topology_only = bool(len(deciding)) and not bool(deciding.per_case_evidence.any())
-        role = "victim" if sym_callees else "origin"
+        if sym_callees:
+            role = "victim"
+        elif callees:
+            role = "origin"
+        else:
+            role = "unknown"  # no dependency information: absence of evidence is not evidence of origin
         path = " -> ".join([x.service] + sym_callees[:2]) if sym_callees else x.service
         ev = (f"symptomatic dependencies: {', '.join(sym_callees[:3])}" if sym_callees
-              else ("no symptomatic dependency" + (f" (deps: {', '.join(callees[:3])})" if callees else " (no known dependencies)")))
+              else (f"no symptomatic dependency (deps: {', '.join(callees[:3])})" if callees
+                    else "NO DEPENDENCY INFORMATION for this service - cannot tell origin from victim"))
         rows.append({**{c: getattr(x, c) for c in CANDIDATE_COLS if c != "rank"},
                      "rank": x.rank, "role": role, "path": path, "direction_evidence": ev,
                      "topology_only": topology_only})
     out = pd.DataFrame(rows, columns=STEP2_CAND_COLS)
-    # origins first, keeping step 1's order inside each group, so step 2's effect is isolated
-    out = out.sort_values(["role", "rank"], key=lambda c: c.map({"origin": 0, "victim": 1}) if c.name == "role" else c)
+    # origins, then services we cannot judge, then victims; step 1's order is kept inside each group
+    out = out.sort_values(["role", "rank"],
+                          key=lambda c: c.map({"origin": 0, "unknown": 1, "victim": 2}) if c.name == "role" else c)
     out["rank"] = range(1, len(out) + 1)
     out["source"] = f"{step1_result['meta']['source']}+py2:{rule}"
     return {"candidates": out.reset_index(drop=True), "symptoms": syms,
@@ -1322,9 +1381,13 @@ broken dependency shows symptoms too (errors, latency, retries), but it is a vic
 Beware the reverse trap: when a service restarts or fails, its datastore logs connection churn - that
 does not make the datastore the origin.
 
+If a service's dependencies are unknown (the block says so), you cannot tell whether it is an origin or a
+victim: put it in "insufficient_evidence" rather than calling it an origin.
+
 Answer with JSON only:
 {"origins": [{"service": "<name>", "why": "<one sentence>", "path": "<victim -> ... -> origin, or the service alone>"}],
- "victims": [{"service": "<name>", "of_service": "<which dependency it is a victim of>", "why": "<one sentence>"}]}
+ "victims": [{"service": "<name>", "of_service": "<which dependency it is a victim of>", "why": "<one sentence>"}],
+ "insufficient_evidence": [{"service": "<name>", "why": "<what is missing>"}]}
 
 Use only service names from the candidates below; order "origins" most likely first; at most 3 origins.
 
@@ -1339,6 +1402,8 @@ STEP2_SCHEMA = {
         "victims": {"type": "array", "items": {"type": "object", "properties": {
             "service": {"type": "string"}, "of_service": {"type": "string"}, "why": {"type": "string"}},
             "required": ["service", "why"]}},
+        "insufficient_evidence": {"type": "array", "items": {"type": "object", "properties": {
+            "service": {"type": "string"}, "why": {"type": "string"}}, "required": ["service"]}},
     },
     "required": ["origins", "victims"],
 }
@@ -1406,6 +1471,30 @@ def step2_llm(case, step1_result, model="qwen2.5-coder:7b", thinking=False, num_
                      "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
                      "role": "victim", "path": f"{svc} -> {v.get('of_service', '?')}",
                      "direction_evidence": "model judgement", "topology_only": False})
+    for u in data.get("insufficient_evidence", [])[:10]:
+        svc = str(u.get("service", ""))
+        if svc not in services:
+            unknown.append(svc)
+        if svc in seen:
+            continue
+        seen.add(svc)
+        base = cands[cands.service == svc]
+        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": svc,
+                     "reason": str(u.get("why", ""))[:300],
+                     "n_signals": int(base.n_signals.iloc[0]) if len(base) else 0,
+                     "first_onset_s": base.first_onset_s.iloc[0] if len(base) else np.nan,
+                     "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
+                     "role": "unknown", "path": svc, "direction_evidence": "model: insufficient evidence",
+                     "topology_only": False})
+    # never drop a step-1 candidate the model did not mention: keep it below, in step 1 order
+    for x in cands.itertuples():
+        if x.service in seen:
+            continue
+        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": x.service,
+                     "reason": "not mentioned by the model; kept from step 1", "n_signals": x.n_signals,
+                     "first_onset_s": x.first_onset_s, "has_clear": x.has_clear, "artifact_only": x.artifact_only,
+                     "role": "unlisted", "path": x.service, "direction_evidence": "carried over from step 1",
+                     "topology_only": False})
     meta["unknown_services"] = sorted(set(unknown))
     return {"candidates": pd.DataFrame(rows, columns=STEP2_CAND_COLS), "symptoms": syms, "meta": meta}
 

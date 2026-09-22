@@ -5,6 +5,7 @@ Evaluating local Ollama models (qwen2.5-coder:7b, gemma4:26b) on root cause anal
 ## Rules
 - `RCAEval-data/` is read-only. Step outputs go to `derived/stepN_*/` as parquet, with a metadata file recording rule/threshold versions (`THRESHOLDS_VERSION`, `STEP0_VERSION` in `rca_lib.py`). Don't write step outputs until asked.
 - Work step by step. Stop and report after each part; don't chain steps or automate without approval.
+- Compression tuned for the model can destroy signals our own rules need. Step 0's templating masked `"msg":"connection accepted"`, `"exception":"java.lang...."`, `"statusCode":500` and `method=Authorise`, so step 2's connection-churn rule could never fire. When adding a rule that reads templated text, check what the templating already removed (`ALWAYS_KEEP_KEYS`), and prefer reading the raw field.
 - Principle: filtering/compression must not collapse subtle symptoms (slow drifts, rate changes, services going quiet, WARN lines, sparse errors, one-off/rare lines, exception class names). Flag any filter or threshold that could hide one; never skip cases or rows silently.
 - Thresholds are provisional; don't tune them on the cases being inspected.
 - Scoring: exact match, case-insensitive, trimmed (`rca_lib.is_correct`). Never substring match.
