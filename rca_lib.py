@@ -590,12 +590,31 @@ def _cut(s, n, full=None):
     return cut + (f" [classes: {', '.join(missing)}]" if missing else "")
 
 
-def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_group=5, tmpl_chars=150):
+def service_order(case, seed=None):
+    """Order services appear in. Default alphabetical; with a seed, a per-case shuffle derived from
+    (seed, case), so a run is reproducible and the order is recorded. Used for the position-bias test:
+    alphabetical order can put the root cause first (Sock Shop "carts") or last ("user") by accident."""
+    services = sorted({c.rsplit("_", 1)[0] for c in load_metrics(case).columns if c != "time"})
+    if seed is None:
+        return services
+    import random
+    rng = random.Random(f"{seed}:{case}")
+    shuffled = list(services)
+    rng.shuffle(shuffled)
+    return shuffled
+
+
+def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_group=5, tmpl_chars=150,
+                 order_seed=None):
     """Ground-truth-blind evidence text. max_pat_rows=None -> unranked, nothing cut (size set by num_ctx).
     With a cap, pattern rows are taken one per service in turn (clear kinds first) and the rest is
-    announced on an OMITTED line - never dropped silently."""
+    announced on an OMITTED line - never dropped silently.
+    order_seed shuffles the service order for the position-bias test (see service_order)."""
     r = case_info(case)
     met, services = step0_metrics(case)
+    services = service_order(case, order_seed)
+    rank = {svc: i for i, svc in enumerate(services)}
+    key = lambda col: col.map(lambda v: rank.get(v, len(rank)))
     omitted = []
     if not include_artifacts and len(met):
         n_art = int((met.artifact_flag != "").sum())
@@ -604,11 +623,12 @@ def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_g
             omitted.append(f"{n_art} metric rows flagged as possible injection artifacts")
     out = [f"SYSTEM: {r['system_name']}. Services: {', '.join(services)}.",
            f"A fault started at t=0. Data covers {int(r['normal_timesteps'])}s before and {int(r['faulty_timesteps'])}s after t=0.",
-           "All tables list services in alphabetical order; nothing is ranked by importance.", "",
+           ("All tables list services in an arbitrary order; nothing is ranked by importance." if order_seed is not None
+            else "All tables list services in alphabetical order; nothing is ranked by importance."), "",
            "== METRICS that changed after t=0 (clear = strong evidence, weak = near a detection threshold) ==",
            "service | metric | change | dir | size(x) | settled_at_s | presence | error_seconds | strength"]
     clear = met[met.clear] if len(met) else met
-    for x in clear.sort_values(["service", "metric"]).itertuples() if len(clear) else []:
+    for x in (clear.sort_values(["service", "metric"], key=key) if len(clear) else clear).itertuples():
         out.append(" | ".join([x.service, x.metric,
                                _plain_evidence(x.evidence) + (" [possible injection artifact]" if x.artifact_flag else ""),
                                x.dir, _fmt_size(x.fold),
@@ -616,15 +636,15 @@ def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_g
                                x.presence, x.errors_nonzero, "clear"]))
     if len(met) and (~met.clear).any():
         parts = [svc + ": " + ", ".join(f"{x.metric} {x.dir} x{_fmt_size(x.fold)}" for x in grp.itertuples())
-                 for svc, grp in met[~met.clear].sort_values(["service", "metric"]).groupby("service")]
+                 for svc, grp in met[~met.clear].sort_values(["service", "metric"], key=key).groupby("service", sort=False)]
         out.append("Weak changes (near a detection threshold): " + "; ".join(parts))
-    quiet_svcs = sorted(set(services) - set(met.service if len(met) else []))
+    quiet_svcs = [x for x in services if x not in set(met.service if len(met) else [])]
     out.append(f"No metric change: {', '.join(quiet_svcs) if quiet_svcs else '(none)'}")
 
     if bool(r["has_logs"]):
         pats, oneoffs, rare, rare_other, vol, null_msgs = step0_logs(case)
         out += ["", "== LOG VOLUME per service (lines/min before -> after; quiet = <25% of normal rate for 30s+) =="]
-        for c, v in vol.sort_index().iterrows():
+        for c, v in vol.reindex([x for x in services if x in vol.index]).iterrows():
             q = ""
             if not pd.isna(v.quiet_from_s):
                 q = f" | quiet from {int(v.quiet_from_s)}s to {int(v.quiet_until_s)}s"
@@ -634,12 +654,13 @@ def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_g
         out += ["", "== LOG PATTERNS after t=0: new, vanished, rate change >=3x (clear) or 2-3x (weak). All log levels, no keyword filter ==",
                 "service | kind | count before -> after | first seen after t=0 (s) | pattern"]
         order = {"new": 0, "vanished": 1, "rate_change": 2, "rate_change_weak": 3}
-        pats = pats.assign(_o=pats.kind.map(order)).sort_values(["container_name", "_o", "post"], ascending=[True, True, False])
+        pats = pats.assign(_o=pats.kind.map(order), _svc=pats.container_name.map(lambda v: rank.get(v, len(rank))))
+        pats = pats.sort_values(["_svc", "_o", "post"], ascending=[True, True, False])
         shown = pats
         if max_pat_rows is not None and len(pats) > max_pat_rows:
             shown = (pats.assign(_r=pats.groupby("container_name").cumcount())
-                     .sort_values(["_r", "_o", "container_name"]).head(max_pat_rows)
-                     .sort_values(["container_name", "_o", "post"], ascending=[True, True, False]))
+                     .sort_values(["_r", "_o", "_svc"]).head(max_pat_rows)
+                     .sort_values(["_svc", "_o", "post"], ascending=[True, True, False]))
             omitted.append(f"{len(pats) - max_pat_rows} log pattern rows beyond the {max_pat_rows}-row budget")
         label = {"rate_change_weak": "rate change (weak)", "rate_change": "rate change"}
         for x in shown.itertuples():
@@ -649,7 +670,7 @@ def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_g
                        f"{_cut(x.tmpl, tmpl_chars, x.example)}{dup}")
 
         def group_lines(groups, what):
-            for c, grp in sorted(groups.items()):
+            for c, grp in sorted(groups.items(), key=lambda kv: rank.get(kv[0], len(rank))):
                 span = f"{int(grp.first_after_s.min())}s-{int(grp.last_after_s.max())}s"
                 ex = "; ".join(f"[{int(e.first_after_s)}s] {_cut(e.tmpl, 90, e.example)}"
                                for e in _sample_across_span(grp, examples_per_group).itertuples())
@@ -661,7 +682,7 @@ def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_g
         group_lines(rare, "rare events seen both before and after t=0 (<=3 lines in total)")
         if rare_other:
             out.append("Other infrequent patterns seen before and after t=0 (not shown): "
-                       + ", ".join(f"{c} {n}" for c, n in sorted(rare_other.items())))
+                       + ", ".join(f"{c} {n}" for c, n in sorted(rare_other.items(), key=lambda kv: rank.get(kv[0], len(rank)))))
         if null_msgs:
             out.append(f"({null_msgs} log lines have no message text)")
     else:
@@ -969,16 +990,17 @@ STEP1_SCHEMA = {  # Ollama structured output, so a malformed number can't cost a
 
 
 def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=True, max_pat_rows=None,
-              num_predict=None, schema=STEP1_SCHEMA):
+              num_predict=None, schema=STEP1_SCHEMA, order_seed=None):
     """LLM symptom detection on the step-0 text. Same output shape as step1_python.
     Services are validated against the case's own service list; invented names are recorded, not silently kept."""
     thinking = thinking and model_supports_thinking(model)  # qwen2.5-coder has no thinking capability
-    evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows)
+    evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
+                            order_seed=order_seed)
     prompt = STEP1_INSTRUCTIONS + evidence
     services = set(step0_metrics(case)[1])
     n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
     num_ctx = num_ctx_for(n_tok, model, thinking)
-    source = f"llm:{model}{'-think' if thinking else '-nothink'}"
+    source = f"llm:{model}{'-think' if thinking else '-nothink'}{'-shuffled' if order_seed is not None else ''}"
 
     attempts, data, err = [], None, None
     if num_predict is None:
@@ -992,7 +1014,8 @@ def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=T
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
     meta = {"case": case, "source": source, "step1_version": STEP1_VERSION, "step0_version": STEP0_VERSION,
-            "include_artifacts": include_artifacts, "evidence_tokens": count_tokens(evidence, "qwen" if "qwen" in model else "gemma"),
+            "include_artifacts": include_artifacts, "order_seed": order_seed,
+            "service_order": service_order(case, order_seed), "evidence_tokens": count_tokens(evidence, "qwen" if "qwen" in model else "gemma"),
             "prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None,
             "n_attempts": len(attempts)}
     if data is None:
