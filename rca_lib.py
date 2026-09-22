@@ -698,7 +698,7 @@ def count_tokens(text, model="qwen"):
 
 
 def num_ctx_for(prompt_tokens, answer_reserve=1024, margin=0.15, round_to=512):
-    """Per-case Ollama num_ctx: prompt + answer reserve + margin, rounded up (6 GB VRAM: don't use a flat 16k).
+    """Per-case Ollama num_ctx: prompt + answer reserve + margin, rounded up, rather than a flat value.
     prompt_tokens must be the FULL prompt (instructions + evidence), not just the evidence."""
     need = prompt_tokens * (1 + margin) + answer_reserve
     return int(np.ceil(need / round_to) * round_to)

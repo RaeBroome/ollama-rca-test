@@ -9,8 +9,9 @@ Evaluating local Ollama models (qwen2.5-coder:7b, gemma4:26b) on root cause anal
 - Thresholds are provisional; don't tune them on the cases being inspected.
 - Scoring: exact match, case-insensitive, trimmed (`rca_lib.is_correct`). Never substring match.
 - Report "clear" and "weak evidence" cases as separate scores. Run scores with and without `diskio_appears` evidence (likely injection artifact).
-- Step 0 has two configurations: unranked (`num_ctx` per case, tests the model's own narrowing) and capped at ~3k tokens with a swappable ranking step. Unranked runs only where it fits the hardware: OB and SS only; capped runs everywhere.
-- Don't call Ollama unless asked. When calling it: temperature 0, `num_ctx` per case from `num_ctx_for(prompt tokens)` (6 GB VRAM: no flat 16k), and check `prompt_eval_count` with `check_prompt_eval` for silent truncation.
+- Step 0 has two configurations: unranked (`num_ctx` per case, tests the model's own narrowing) and capped at ~3k tokens with a swappable ranking step. Both run on all datasets, including TrainTicket.
+- Don't call Ollama unless asked. When calling it: temperature 0, `num_ctx` per case from `num_ctx_for(prompt tokens)` rather than a flat value, and check `prompt_eval_count` with `check_prompt_eval` for silent truncation.
+- Experiments run on this machine: NVIDIA RTX A4500, 20 GB. qwen2.5-coder:7b stays fully on GPU up to 16k context (~5.4 GB, ~94 tok/s).
 
 ## Data
 - Per case: `metrics.parquet`, `logs.parquet`, `traces.parquet` (none for Sock Shop), `inject_time.txt`; 8 RE3-SS cases have `root_cause.txt`. Index: `cases.parquet` (`root_cause_service` = ground truth).
