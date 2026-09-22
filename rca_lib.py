@@ -697,11 +697,37 @@ def count_tokens(text, model="qwen"):
         return round(len(text) / 3.5)
 
 
-def num_ctx_for(prompt_tokens, answer_reserve=1024, margin=0.15, round_to=512):
+# Answer reserve per model. Thinking models spend most of their output on reasoning that never reaches
+# message.content: gemma4:26b returned an empty answer with num_predict 80-100. PROVISIONAL - the thinking
+# reserve was set from a trivial prompt (195 tokens) and should be re-measured on real step-0 prompts.
+ANSWER_RESERVE = {"default": 1024, "qwen2.5-coder:7b": 1024, "gemma4:26b": 1024}
+THINKING_EXTRA = 2048
+
+
+def answer_reserve_for(model=None, thinking=False):
+    return ANSWER_RESERVE.get(model, ANSWER_RESERVE["default"]) + (THINKING_EXTRA if thinking else 0)
+
+
+def num_ctx_for(prompt_tokens, model=None, thinking=False, answer_reserve=None, margin=0.15, round_to=512):
     """Per-case Ollama num_ctx: prompt + answer reserve + margin, rounded up, rather than a flat value.
-    prompt_tokens must be the FULL prompt (instructions + evidence), not just the evidence."""
-    need = prompt_tokens * (1 + margin) + answer_reserve
+    prompt_tokens must be the FULL prompt (instructions + evidence), not just the evidence.
+    The reserve is per model and larger when thinking is on (see ANSWER_RESERVE)."""
+    reserve = answer_reserve_for(model, thinking) if answer_reserve is None else answer_reserve
+    need = prompt_tokens * (1 + margin) + reserve
     return int(np.ceil(need / round_to) * round_to)
+
+
+def gpu_memory_mb():
+    """(free, used, total) MiB from nvidia-smi, or None. Sample this right before every timed model run and
+    record it with the result: Ollama 0.34.2's /api/ps returns an empty model list, so there is no GPU/CPU
+    split from the API, and a spill can only be spotted afterwards from free memory plus throughput."""
+    import subprocess
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free,memory.used,memory.total",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=30).stdout
+        return tuple(int(x) for x in out.strip().splitlines()[0].split(","))
+    except Exception:
+        return None
 
 
 def check_prompt_eval(expected_tokens, prompt_eval_count, tolerance=0.1):

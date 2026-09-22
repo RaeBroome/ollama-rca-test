@@ -10,8 +10,10 @@ Evaluating local Ollama models (qwen2.5-coder:7b, gemma4:26b) on root cause anal
 - Scoring: exact match, case-insensitive, trimmed (`rca_lib.is_correct`). Never substring match.
 - Report "clear" and "weak evidence" cases as separate scores. Run scores with and without `diskio_appears` evidence (likely injection artifact).
 - Step 0 has two configurations: unranked (`num_ctx` per case, tests the model's own narrowing) and capped at ~3k tokens with a swappable ranking step. Both run on all datasets, including TrainTicket.
-- Don't call Ollama unless asked. When calling it: temperature 0, `num_ctx` per case from `num_ctx_for(prompt tokens)` rather than a flat value, and check `prompt_eval_count` with `check_prompt_eval` for silent truncation.
-- Experiments run on this machine: NVIDIA RTX A4500, 20 GB. qwen2.5-coder:7b stays fully on GPU up to 16k context (~5.4 GB, ~94 tok/s).
+- Don't call Ollama unless asked. When calling it: temperature 0, `num_ctx` per case from `num_ctx_for(prompt tokens, model, thinking)` rather than a flat value, and check `prompt_eval_count` with `check_prompt_eval` for silent truncation.
+- gemma4:26b is a thinking model. Thinking is an experiment variable, **default on**; when comparing models, run gemma both ways and report the two separately. Read answers from `message.content` only, never `thinking` (with too small an answer budget, `content` comes back empty).
+- Sample `gpu_memory_mb()` right before every timed run and record it with the result. Ollama 0.34.2's `/api/ps` returns an empty model list, so there is no GPU/CPU split from the API and a spill is only visible afterwards from free memory plus throughput.
+- Experiments run on this machine: NVIDIA RTX A4500, 20 GB. qwen2.5-coder:7b stays fully on GPU up to 16k context (~5.4 GB, ~94 tok/s); gemma4:26b needs ~18.7-19.0 GB (94-96% of the card) and can't be resident at the same time, so unload between models.
 
 ## Data
 - Per case: `metrics.parquet`, `logs.parquet`, `traces.parquet` (none for Sock Shop), `inject_time.txt`; 8 RE3-SS cases have `root_cause.txt`. Index: `cases.parquet` (`root_cause_service` = ground truth).
