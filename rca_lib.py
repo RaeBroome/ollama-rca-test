@@ -1521,6 +1521,129 @@ def step2_sheet(case, step1_result, step2_results, known_victims=()):
             out.append(f"      graph: {meta['graph_edges']} edges, {meta['edges_without_case_evidence']} without per-case evidence")
     return "\n".join(out)
 
+
+# ============================================================ run records (results/<timestamp>-<label>/)
+# Every run writes its own folder, so re-runs never overwrite earlier results:
+#   step1.parquet      one row per candidate per arm
+#   step2.parquet      the same plus role / path / direction_evidence / would_demote
+#   symptoms.parquet   the symptom rows behind those candidates
+#   retention.parquet  ONE ROW PER EXPECTED ITEM (kept True/False), not just counts
+#   summary.csv        one row per case per arm, openable in any spreadsheet
+#   metadata.json      step versions, thresholds, seed, models, timings, GPU
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+
+
+def start_run(label, notes=""):
+    """Create results/<timestamp>-<label>/ and return the path."""
+    d = RESULTS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}"
+    d.mkdir(parents=True, exist_ok=False)
+    return d
+
+
+def _case_facts(case, _cache={}):
+    if case not in _cache:
+        info = case_info(case)
+        ev = service_evidence(case, info["system"], info["root_cause_service"], load_inject_time(case))
+        _cache[case] = {"truth": info["root_cause_service"], "dataset": info["dataset"], "fault": info["fault"],
+                        "status": "clear" if diagnosability_status(ev) == "diagnosable" else "weak",
+                        "checks": RETENTION_CHECKS.get(case) or auto_retention_checks(case)}
+    return _cache[case]
+
+
+def retention_detail(case, arm, symptoms, checks=None):
+    """One row per expected item: which subtle signals this arm kept and which it lost."""
+    checks = _case_facts(case)["checks"] if checks is None else checks
+    s = symptoms
+    text = (s.signal.fillna("") + " " + s.reason.fillna("")).str.lower() if len(s) else pd.Series(dtype=str)
+    rows = []
+    for label, svc, kinds, words in checks:
+        hit = False
+        if len(s):
+            same = s.service == svc
+            hit = bool(((same & s.kind.isin(kinds)) | (same & text.apply(lambda t: any(w in t for w in words)))).any())
+        rows.append({"case": case, "arm": arm, "item": label, "service": svc,
+                     "kinds": ",".join(sorted(kinds)), "keywords": ",".join(words), "kept": hit})
+    return rows
+
+
+def write_run(run_dir, records, notes="", extra_meta=None):
+    """records: list of {case, stage ('step1'|'step2'), source, result}. Writes the files listed above."""
+    run_dir = Path(run_dir)
+    cand_rows, sym_rows, ret_rows, summary = {"step1": [], "step2": []}, [], [], []
+    for r in records:
+        case, stage, source, res = r["case"], r["stage"], r["source"], r["result"]
+        facts = _case_facts(case)
+        cands, syms, meta = res["candidates"], res["symptoms"], res["meta"]
+        c = cands.copy()
+        c.insert(0, "stage", stage)
+        c.insert(0, "run_source", source)
+        c.insert(0, "truth", facts["truth"])
+        cand_rows[stage].append(c)
+        if stage == "step1":
+            sy = syms.copy()
+            sy.insert(0, "run_source", source)
+            sym_rows.append(sy)
+        ret_rows += retention_detail(case, source, syms)
+        names = list(cands.service)
+        rank = names.index(facts["truth"]) + 1 if facts["truth"] in names else None
+        answer = names[0] if names else None
+        truth_row = cands[cands.service == facts["truth"]]
+        det = retention_detail(case, source, syms)
+        a = (meta.get("attempts") or [{}])[-1]
+        summary.append({
+            "case": case, "dataset": facts["dataset"], "fault": facts["fault"], "status": facts["status"],
+            "truth": facts["truth"], "stage": stage, "arm": source,
+            "answer": answer, "correct": bool(answer and is_correct(answer, facts["truth"])),
+            "rank_of_truth": rank,
+            "reason_for_answer": (cands.reason.iloc[0] if len(cands) else ""),
+            "reason_for_truth": (truth_row.reason.iloc[0] if len(truth_row) else ""),
+            "role_of_truth": (truth_row.role.iloc[0] if len(truth_row) and "role" in truth_row else ""),
+            "retention_kept": "; ".join(x["item"] for x in det if x["kept"]),
+            "retention_missed": "; ".join(x["item"] for x in det if not x["kept"]),
+            "retention_score": f"{sum(x['kept'] for x in det)}/{len(det)}",
+            "prompt_tokens": meta.get("prompt_tokens"), "eval_tokens": a.get("eval_count"),
+            "wall_s": a.get("wall_s"), "gpu_free_before_MB": a.get("gpu_free_before_MB"),
+            "parse_error": meta.get("parse_error"), "model": a.get("model", ""),
+            "thinking": a.get("thinking", ""), "num_ctx": a.get("num_ctx"),
+        })
+    for stage in ("step1", "step2"):
+        if cand_rows[stage]:
+            pd.concat(cand_rows[stage], ignore_index=True).to_parquet(run_dir / f"{stage}.parquet", index=False)
+    if sym_rows:
+        pd.concat(sym_rows, ignore_index=True).to_parquet(run_dir / "symptoms.parquet", index=False)
+    pd.DataFrame(ret_rows).drop_duplicates().to_parquet(run_dir / "retention.parquet", index=False)
+    summary_df = pd.DataFrame(summary)
+    summary_df.to_csv(run_dir / "summary.csv", index=False)
+    gpu = gpu_memory_mb()
+    meta = {"written_at": time.strftime("%Y-%m-%d %H:%M:%S"), "notes": notes,
+            "versions": {"step0": STEP0_VERSION, "step1": STEP1_VERSION, "step2": STEP2_VERSION,
+                         "thresholds": THRESHOLDS_VERSION},
+            "thresholds": THRESHOLDS, "evidence_thresholds": EVIDENCE_THRESHOLDS, "step0_params": STEP0_PARAMS,
+            "borderline_margin": BORDERLINE_MARGIN, "order_seed": DEFAULT_ORDER_SEED,
+            "answer_reserve": ANSWER_RESERVE, "thinking_extra": THINKING_EXTRA,
+            "cases": sorted({r["case"] for r in records}), "arms": sorted({r["source"] for r in records}),
+            "runs": len(records), "gpu_free_MB_at_write": gpu[0] if gpu else None,
+            "scoring_exclusions_static": {**EXCLUDE, **BROKEN_LABELS},
+            **(extra_meta or {})}
+    (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+    return summary_df
+
+
+def read_case(run_dir, case, arm=None):
+    """Read one case's records back: summary rows, candidates, symptoms, retention detail."""
+    run_dir = Path(run_dir)
+    out = {}
+    s = pd.read_csv(run_dir / "summary.csv")
+    out["summary"] = s[(s.case == case) & (s.arm == arm if arm else True)]
+    for name in ["step1", "step2", "symptoms", "retention"]:
+        f = run_dir / f"{name}.parquet"
+        if f.exists():
+            df = pd.read_parquet(f)
+            col = "run_source" if "run_source" in df.columns else "arm"
+            df = df[df.case == case]
+            out[name] = df[df[col] == arm] if arm else df
+    return out
+
 # ============================================================ CLI (used by the inspect-case skill)
 def inspect_case(case, include_artifacts=True, max_pat_rows=None):
     """Human-facing report for one case: labels, exclusions, evidence on the true root cause, and the

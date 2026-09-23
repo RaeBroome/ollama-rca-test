@@ -1,0 +1,95 @@
+{
+  "written_at": "2026-09-23 08:23:58",
+  "notes": "12-case sample, step 1 + label-only step 2, shuffled service order",
+  "versions": {
+    "step0": "step0-v0.2",
+    "step1": "step1-v0.1",
+    "step2": "step2-v0.2-label-only",
+    "thresholds": "shape-v2.3"
+  },
+  "thresholds": {
+    "min_z": 5,
+    "min_log2_fold": 0.25,
+    "gradual_trend_share": 0.3,
+    "step_plateau_max_s": 120,
+    "trend_min_z": 10,
+    "trend_min_rho": 0.5
+  },
+  "evidence_thresholds": {
+    "presence_min_delta": 0.2,
+    "sparse_min_frac": 0.05,
+    "sparse_min_ratio": 2.0
+  },
+  "step0_params": {
+    "rate_ratio": 3.0,
+    "weak_rate_ratio": 2.0,
+    "min_lines": 20,
+    "new_min": 3,
+    "rare_max": 20,
+    "rare_event_max": 3
+  },
+  "borderline_margin": 0.2,
+  "order_seed": 1234,
+  "answer_reserve": {
+    "default": 1024,
+    "qwen2.5-coder:7b": 1024,
+    "gemma4:26b": 1024
+  },
+  "thinking_extra": 4096,
+  "cases": [
+    "re1ob_adservice_mem_1",
+    "re1ob_cartservice_loss_4",
+    "re1tt_ts-order-service_cpu_1",
+    "re2ob_checkoutservice_disk_1",
+    "re2ss_user_loss_1",
+    "re2tt_ts-order-service_delay_1",
+    "re3ss_carts_f1_1",
+    "re3ss_carts_f3_1",
+    "re3ss_carts_f4_1",
+    "re3ss_front-end_f1_1",
+    "re3ss_orders_f1_1",
+    "re3ss_orders_f3_1"
+  ],
+  "arms": [
+    "llm:gemma4:26b-nothink-shuffled",
+    "llm:gemma4:26b-nothink-shuffled+llm2:gemma4:26b",
+    "llm:gemma4:26b-nothink-shuffled+py2:naive",
+    "llm:gemma4:26b-nothink-shuffled+py2:rule",
+    "llm:qwen2.5-coder:7b-nothink-shuffled",
+    "llm:qwen2.5-coder:7b-nothink-shuffled+llm2:qwen2.5-coder:7b",
+    "llm:qwen2.5-coder:7b-nothink-shuffled+py2:naive",
+    "llm:qwen2.5-coder:7b-nothink-shuffled+py2:rule",
+    "python:onset",
+    "python:strength",
+    "python:strength+llm2:gemma4:26b",
+    "python:strength+llm2:qwen2.5-coder:7b",
+    "python:strength+py2:naive",
+    "python:strength+py2:rule"
+  ],
+  "runs": 168,
+  "gpu_free_MB_at_write": 18183,
+  "scoring_exclusions_static": {
+    "re1ob_currencyservice_loss_1": "inject_time in index/txt is 16933142 (missing digits) - no normal period",
+    "re1ob_productcatalogservice_cpu_3": "inject_time is after the last metric row - no fault period",
+    "re3ss_front-end_f2_2": "root_cause.txt is a byte-for-byte copy of re3ss_front-end_f2_1's; its line is 3 h before inject_time and absent from this case's logs"
+  },
+  "sample": [
+    "re3ss_carts_f1_1",
+    "re3ss_carts_f3_1",
+    "re3ss_orders_f1_1",
+    "re3ss_orders_f3_1",
+    "re3ss_front-end_f1_1",
+    "re2ss_user_loss_1",
+    "re1ob_adservice_mem_1",
+    "re2ob_checkoutservice_disk_1",
+    "re1tt_ts-order-service_cpu_1",
+    "re2tt_ts-order-service_delay_1",
+    "re1ob_cartservice_loss_4",
+    "re3ss_carts_f4_1"
+  ],
+  "models": [
+    "qwen2.5-coder:7b",
+    "gemma4:26b"
+  ],
+  "elapsed_s": 2821
+}
