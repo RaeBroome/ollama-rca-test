@@ -1143,6 +1143,7 @@ def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
 # Step 2 sees ONLY step 1's output plus a dependency block (decided), so step 1's retention differences stay
 # visible. Output is the step 1 shape plus role / path / direction_evidence.
 STEP2_VERSION = "step2-v0.2-label-only"
+STEP3_VERSION = "step3-v0.1"
 STEP2_CAND_COLS = CANDIDATE_COLS + ["role", "path", "direction_evidence", "topology_only"]
 
 # A datastore whose only symptoms are connection/socket churn is NOT treated as an origin by the "rule" arm:
@@ -1252,7 +1253,18 @@ def queue_edges(case, min_lines=3):
     return pd.DataFrame(rows).drop_duplicates(subset=["caller", "callee"]) if rows else pd.DataFrame()
 
 
+@lru_cache(maxsize=64)
+def _case_call_graph_cached(case):
+    return _case_call_graph(case)
+
+
 def case_call_graph(case):
+    """Cached per case: trace parsing is single-core and was repeated for every arm. Callers must not mutate
+    the returned frames (nothing in the pipeline does)."""
+    return _case_call_graph_cached(case)
+
+
+def _case_call_graph(case):
     """Merged graph with per-edge provenance. provenance: trace | log | static | topology.
     per_case_evidence is False for static/topology edges - results that hinge on those are flagged."""
     info = case_info(case)
@@ -1522,6 +1534,131 @@ def step2_sheet(case, step1_result, step2_results, known_victims=()):
     return "\n".join(out)
 
 
+
+# ============================================================ step 3: the final root-cause decision
+# One answer per case, or an explicit abstention (scored separately - a refusal is not a wrong answer).
+# Input is step 1's ranking with step 2's labels attached; no raw evidence, so step 1's retention still governs
+# what is visible. P-top1 is the control: if no configuration beats "take step 1's top candidate", that is the
+# result of the project.
+STEP3_COLS = ["case", "source", "rank", "service", "reason", "role", "path", "confidence"]
+
+
+def _confidence(row, has_origin_role):
+    if row is None:
+        return "low"
+    if bool(getattr(row, "has_clear", False)) and has_origin_role:
+        return "high"
+    return "medium" if bool(getattr(row, "has_clear", False)) else "low"
+
+
+def _step3_result(case, source, service, confidence, justification, row=None, abstained=False, extra=None):
+    cols = {"case": case, "source": source, "rank": 1, "service": service,
+            "reason": justification, "role": getattr(row, "role", "") if row is not None else "",
+            "path": getattr(row, "path", "") if row is not None else "", "confidence": confidence}
+    cands = pd.DataFrame([] if abstained else [cols], columns=STEP3_COLS)
+    meta = {"case": case, "source": source, "step3_version": STEP3_VERSION, "answer": service,
+            "confidence": confidence, "justification": justification, "abstained": abstained, **(extra or {})}
+    return {"candidates": cands, "meta": meta}
+
+
+def step3_python(case, step2_result, rule="top1"):
+    """rule='top1': answer = step 1's top candidate (the control).
+    rule='role':  answer = the highest-ranked candidate step 2 labelled 'origin'; falls back to top1 and
+                  records the fallback. Abstains when no candidate has clear evidence."""
+    cands, syms = step2_result["candidates"], step2_result["symptoms"]
+    source = f"{step2_result['meta']['source']}+py3:{rule}"
+    if not len(cands):
+        return {**_step3_result(case, source, None, "none", "no candidates from step 1", abstained=True),
+                "symptoms": syms}
+    if not bool(cands.has_clear.any()):
+        return {**_step3_result(case, source, None, "none",
+                                "no candidate has clear evidence; abstaining rather than guessing",
+                                abstained=True), "symptoms": syms}
+    top = cands.iloc[0]
+    pick, fallback = top, False
+    if rule == "role":
+        origins = cands[cands.role == "origin"] if "role" in cands else cands.iloc[0:0]
+        if len(origins):
+            pick = origins.iloc[0]
+        else:
+            fallback = True
+    has_origin = "role" in cands and bool((cands.role == "origin").any())
+    why = str(pick.reason)[:300]
+    if rule == "role":
+        why = (f"step 2 labelled it the origin; {why}" if not fallback
+               else f"no candidate was labelled origin, fell back to step 1's top candidate; {why}")
+    return {**_step3_result(case, source, pick.service, _confidence(pick, has_origin), why, row=pick,
+                            extra={"fallback_to_top1": fallback}), "symptoms": syms}
+
+
+STEP3_INSTRUCTIONS = """A fault started at t=0 in a microservice system. Symptom detection and dependency
+tracing have already run. Below are the candidate services, each with its symptoms and its role
+(origin = the fault started here; victim = it depends on a broken service; unknown = its dependencies are
+not known; unlisted = tracing did not judge it).
+
+Name the ONE service where the fault originated. If the evidence does not support any single service, answer
+"none" - an honest abstention is better than a guess, and abstentions are scored separately from wrong answers.
+
+Answer with JSON only:
+{"answer": "<service name, or none>", "confidence": "high|medium|low", "justification": "<one sentence>"}
+
+Use only service names from the list below.
+
+"""
+
+STEP3_SCHEMA = {"type": "object",
+                "properties": {"answer": {"type": "string"}, "confidence": {"type": "string"},
+                               "justification": {"type": "string"}},
+                "required": ["answer", "confidence", "justification"]}
+
+
+def step3_llm(case, step2_result, model="qwen2.5-coder:7b", thinking=False, num_predict=None):
+    """Same input as step3_python. Abstention ("none") is allowed and recorded, never scored as a wrong answer."""
+    cands, syms = step2_result["candidates"], step2_result["symptoms"]
+    thinking = thinking and model_supports_thinking(model)
+    lines = ["== CANDIDATES (in the order symptom detection ranked them) =="]
+    for x in cands.itertuples():
+        own = syms[syms.service == x.service] if len(syms) else syms
+        sig = "; ".join(f"{s.kind} {s.signal[:55]}" for s in own.head(3).itertuples()) or "(no detail)"
+        role = getattr(x, "role", "")
+        path = getattr(x, "path", "")
+        lines.append(f"{x.service} [role: {role}{', path: ' + path if path and path != x.service else ''}] "
+                     f"| {str(x.reason)[:140]} | symptoms: {sig}")
+    prompt = STEP3_INSTRUCTIONS + "\
+".join(lines)
+    services = set(cands.service)
+    n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
+    if num_predict is None:
+        num_predict = answer_reserve_for(model, thinking)
+    source = f"{step2_result['meta']['source']}+llm3:{model}"
+
+    attempts, data, err = [], None, None
+    for _ in range(2):
+        r = ollama_chat(model, prompt, num_ctx_for(n_tok, model, thinking), thinking=thinking,
+                        num_predict=num_predict, schema=STEP3_SCHEMA)
+        attempts.append(r["meta"] | {"thinking_chars": r["thinking_chars"], "content_chars": len(r["content"])})
+        try:
+            data = _parse_json_block(r["content"])
+            break
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    extra = {"prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None}
+    if data is None:
+        return {**_step3_result(case, source, None, "none", "unparseable answer", abstained=True, extra=extra),
+                "symptoms": syms}
+    answer = str(data.get("answer", "")).strip()
+    conf = str(data.get("confidence", ""))[:10]
+    why = str(data.get("justification", ""))[:300]
+    if normalize_service(answer) in ("none", "", "unknown"):
+        return {**_step3_result(case, source, None, conf or "none", why or "model abstained", abstained=True,
+                                extra=extra), "symptoms": syms}
+    if answer not in services:  # a name not on the list is not an answer we can score
+        extra["unknown_services"] = [answer]
+        return {**_step3_result(case, source, None, conf, f"model named a service not in the candidate list: {answer}",
+                                abstained=True, extra=extra), "symptoms": syms}
+    row = cands[cands.service == answer].iloc[0]
+    return {**_step3_result(case, source, answer, conf, why, row=row, extra=extra), "symptoms": syms}
+
 # ============================================================ run records (results/<timestamp>-<label>/)
 # Every run writes its own folder, so re-runs never overwrite earlier results:
 #   step1.parquet      one row per candidate per arm
@@ -1534,10 +1671,98 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
 def start_run(label, notes=""):
-    """Create results/<timestamp>-<label>/ and return the path."""
+    """Create results/<timestamp>-<label>/ and return a RunWriter that persists every record as it arrives."""
     d = RESULTS_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}"
     d.mkdir(parents=True, exist_ok=False)
-    return d
+    return RunWriter(d, notes=notes)
+
+
+class RunWriter:
+    """Writes each record to disk as it is produced, so a crash mid-run keeps everything up to that point.
+    During the run: summary.csv plus *.jsonl (append-only, flushed per record). finalize() converts the
+    jsonl files to parquet and writes metadata.json; partial runs stay readable as jsonl."""
+
+    def __init__(self, run_dir, notes=""):
+        self.dir = Path(run_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.notes = notes
+        self.n = 0
+        self.t0 = time.time()
+        self._summary_header = False
+
+    def _append_jsonl(self, name, rows):
+        if not rows:
+            return
+        with open(self.dir / f"{name}.jsonl", "a", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, default=str) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+    def add(self, case, stage, source, result):
+        """Persist one record (one arm on one case) immediately."""
+        facts = _case_facts(case)
+        cands, syms, meta = result["candidates"], result["symptoms"], result["meta"]
+        det = retention_detail(case, source, syms)
+        names = list(cands.service)
+        rank = names.index(facts["truth"]) + 1 if facts["truth"] in names else None
+        answer = meta.get("answer", names[0] if names else None)
+        truth_row = cands[cands.service == facts["truth"]]
+        a = (meta.get("attempts") or [{}])[-1]
+        row = {
+            "case": case, "dataset": facts["dataset"], "fault": facts["fault"], "status": facts["status"],
+            "truth": facts["truth"], "stage": stage, "arm": source,
+            "answer": answer, "correct": bool(answer and is_correct(answer, facts["truth"])),
+            "abstained": bool(meta.get("abstained", False)), "confidence": meta.get("confidence", ""),
+            "rank_of_truth": rank,
+            "reason_for_answer": meta.get("justification", cands.reason.iloc[0] if len(cands) else ""),
+            "reason_for_truth": (truth_row.reason.iloc[0] if len(truth_row) else ""),
+            "role_of_truth": (truth_row.role.iloc[0] if len(truth_row) and "role" in truth_row else ""),
+            "retention_kept": "; ".join(x["item"] for x in det if x["kept"]),
+            "retention_missed": "; ".join(x["item"] for x in det if not x["kept"]),
+            "retention_score": f"{sum(x['kept'] for x in det)}/{len(det)}",
+            "prompt_tokens": meta.get("prompt_tokens"), "eval_tokens": a.get("eval_count"),
+            "wall_s": a.get("wall_s"), "gpu_free_before_MB": a.get("gpu_free_before_MB"),
+            "parse_error": meta.get("parse_error"), "model": a.get("model", ""),
+            "thinking": a.get("thinking", ""), "num_ctx": a.get("num_ctx"),
+        }
+        pd.DataFrame([row]).to_csv(self.dir / "summary.csv", mode="a", index=False,
+                                   header=not self._summary_header)
+        self._summary_header = True
+        c = cands.copy()
+        c.insert(0, "stage", stage)
+        c.insert(0, "run_source", source)
+        c.insert(0, "truth", facts["truth"])
+        self._append_jsonl(stage, c.to_dict("records"))
+        if stage == "step1":
+            sy = syms.copy()
+            sy.insert(0, "run_source", source)
+            self._append_jsonl("symptoms", sy.to_dict("records"))
+        self._append_jsonl("retention", det)
+        self.n += 1
+        return row
+
+    def finalize(self, extra_meta=None):
+        """Convert the jsonl files to parquet and write metadata.json."""
+        for name in ["step1", "step2", "step3", "symptoms", "retention"]:
+            f = self.dir / f"{name}.jsonl"
+            if f.exists():
+                pd.read_json(f, lines=True).to_parquet(self.dir / f"{name}.parquet", index=False)
+                f.unlink()
+        gpu = gpu_memory_mb()
+        meta = {"written_at": time.strftime("%Y-%m-%d %H:%M:%S"), "notes": self.notes,
+                "versions": {"step0": STEP0_VERSION, "step1": STEP1_VERSION, "step2": STEP2_VERSION,
+                             "step3": STEP3_VERSION, "thresholds": THRESHOLDS_VERSION},
+                "thresholds": THRESHOLDS, "evidence_thresholds": EVIDENCE_THRESHOLDS,
+                "step0_params": STEP0_PARAMS, "borderline_margin": BORDERLINE_MARGIN,
+                "order_seed": DEFAULT_ORDER_SEED, "answer_reserve": ANSWER_RESERVE,
+                "thinking_extra": THINKING_EXTRA, "records": self.n,
+                "elapsed_s": round(time.time() - self.t0),
+                "gpu_free_MB_at_write": gpu[0] if gpu else None,
+                "scoring_exclusions_static": {**EXCLUDE, **BROKEN_LABELS},
+                **(extra_meta or {})}
+        (self.dir / "metadata.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+        return pd.read_csv(self.dir / "summary.csv")
 
 
 def _case_facts(case, _cache={}):
@@ -1567,66 +1792,12 @@ def retention_detail(case, arm, symptoms, checks=None):
 
 
 def write_run(run_dir, records, notes="", extra_meta=None):
-    """records: list of {case, stage ('step1'|'step2'), source, result}. Writes the files listed above."""
-    run_dir = Path(run_dir)
-    cand_rows, sym_rows, ret_rows, summary = {"step1": [], "step2": []}, [], [], []
+    """Batch wrapper kept for convenience: prefer RunWriter.add() so a crash mid-run keeps what ran.
+    records: list of {case, stage, source, result}."""
+    w = run_dir if isinstance(run_dir, RunWriter) else RunWriter(run_dir, notes=notes)
     for r in records:
-        case, stage, source, res = r["case"], r["stage"], r["source"], r["result"]
-        facts = _case_facts(case)
-        cands, syms, meta = res["candidates"], res["symptoms"], res["meta"]
-        c = cands.copy()
-        c.insert(0, "stage", stage)
-        c.insert(0, "run_source", source)
-        c.insert(0, "truth", facts["truth"])
-        cand_rows[stage].append(c)
-        if stage == "step1":
-            sy = syms.copy()
-            sy.insert(0, "run_source", source)
-            sym_rows.append(sy)
-        ret_rows += retention_detail(case, source, syms)
-        names = list(cands.service)
-        rank = names.index(facts["truth"]) + 1 if facts["truth"] in names else None
-        answer = names[0] if names else None
-        truth_row = cands[cands.service == facts["truth"]]
-        det = retention_detail(case, source, syms)
-        a = (meta.get("attempts") or [{}])[-1]
-        summary.append({
-            "case": case, "dataset": facts["dataset"], "fault": facts["fault"], "status": facts["status"],
-            "truth": facts["truth"], "stage": stage, "arm": source,
-            "answer": answer, "correct": bool(answer and is_correct(answer, facts["truth"])),
-            "rank_of_truth": rank,
-            "reason_for_answer": (cands.reason.iloc[0] if len(cands) else ""),
-            "reason_for_truth": (truth_row.reason.iloc[0] if len(truth_row) else ""),
-            "role_of_truth": (truth_row.role.iloc[0] if len(truth_row) and "role" in truth_row else ""),
-            "retention_kept": "; ".join(x["item"] for x in det if x["kept"]),
-            "retention_missed": "; ".join(x["item"] for x in det if not x["kept"]),
-            "retention_score": f"{sum(x['kept'] for x in det)}/{len(det)}",
-            "prompt_tokens": meta.get("prompt_tokens"), "eval_tokens": a.get("eval_count"),
-            "wall_s": a.get("wall_s"), "gpu_free_before_MB": a.get("gpu_free_before_MB"),
-            "parse_error": meta.get("parse_error"), "model": a.get("model", ""),
-            "thinking": a.get("thinking", ""), "num_ctx": a.get("num_ctx"),
-        })
-    for stage in ("step1", "step2"):
-        if cand_rows[stage]:
-            pd.concat(cand_rows[stage], ignore_index=True).to_parquet(run_dir / f"{stage}.parquet", index=False)
-    if sym_rows:
-        pd.concat(sym_rows, ignore_index=True).to_parquet(run_dir / "symptoms.parquet", index=False)
-    pd.DataFrame(ret_rows).drop_duplicates().to_parquet(run_dir / "retention.parquet", index=False)
-    summary_df = pd.DataFrame(summary)
-    summary_df.to_csv(run_dir / "summary.csv", index=False)
-    gpu = gpu_memory_mb()
-    meta = {"written_at": time.strftime("%Y-%m-%d %H:%M:%S"), "notes": notes,
-            "versions": {"step0": STEP0_VERSION, "step1": STEP1_VERSION, "step2": STEP2_VERSION,
-                         "thresholds": THRESHOLDS_VERSION},
-            "thresholds": THRESHOLDS, "evidence_thresholds": EVIDENCE_THRESHOLDS, "step0_params": STEP0_PARAMS,
-            "borderline_margin": BORDERLINE_MARGIN, "order_seed": DEFAULT_ORDER_SEED,
-            "answer_reserve": ANSWER_RESERVE, "thinking_extra": THINKING_EXTRA,
-            "cases": sorted({r["case"] for r in records}), "arms": sorted({r["source"] for r in records}),
-            "runs": len(records), "gpu_free_MB_at_write": gpu[0] if gpu else None,
-            "scoring_exclusions_static": {**EXCLUDE, **BROKEN_LABELS},
-            **(extra_meta or {})}
-    (run_dir / "metadata.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
-    return summary_df
+        w.add(r["case"], r["stage"], r["source"], r["result"])
+    return w.finalize(extra_meta)
 
 
 def read_case(run_dir, case, arm=None):
