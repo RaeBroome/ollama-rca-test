@@ -76,7 +76,7 @@ did to it; handing it who-calls-whom changed nothing at all, on any of the 12 ca
 ## Abstention never fires when it should
 
 Every arm could answer "none". Across **42 weak-evidence decisions** in the 50-case run — both models, three
-evidence variants — there were **zero abstentions**. qwen abstained once in 150 clear-case calls. When
+evidence variants — there were **zero abstentions**. qwen abstained once in 129 clear-case calls. When
 abstentions did happen, they were not selective: in the staged run, 14 abstentions landed on cases where the
 baseline would have been wrong only 6 times, against a 48% base rate of it being wrong. The instruction is
 present in the prompt and these models do not act on it.

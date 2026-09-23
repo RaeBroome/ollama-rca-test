@@ -85,4 +85,8 @@ python -c "from rca_lib import read_case; r = read_case('results/<run>', 're3ss_
 - `run_sample.py`, `analyse_run.py` — orchestration and analysis.
 - `explore.ipynb` — the exploration behind the design; section 7 holds scoring exclusions and known
   limitations.
+- `run_test.py`, `run_test_logs.py` — the original naive baselines: raw metrics or log lines dumped
+  straight into a prompt. Kept as the evidence behind the one-shot failure described in
+  [FINDINGS.md](FINDINGS.md); `run_test.py` still scores with the substring check that inflates
+  accuracy, left as-is to show the trap.
 - `CLAUDE.md` — working rules for this project.
