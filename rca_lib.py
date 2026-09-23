@@ -1185,12 +1185,24 @@ def trace_graph(case, inject_time=None):
     return edges, excl
 
 
-def log_graph(case):
-    """Edges from one service's logs naming another (URLs, hosts, connection strings). Sock Shop has no
-    traces, so this is the only per-case evidence of who calls whom there."""
+def _call_shaped(svc):
+    """The service name in a CALL context: a URL path (http://carts/...), a host:port (carts-db:27017), or a
+    connection string. A bare mention is not a dependency: carts logs "Creating item for user: <id>", which
+    produced 1456 false pieces of evidence for a carts -> user edge that does not exist."""
+    return re.compile(rf"(?<![\w-]){re.escape(svc)}(?::\d|/)")
+
+
+def _bare_mention(svc):
+    return re.compile(rf"(?<![\w-]){re.escape(svc)}(?![\w-])")
+
+
+def log_graph(case, shape="call"):
+    """Edges from one service's logs naming another. Sock Shop has no traces, so this is the only per-case
+    evidence of who calls whom there. shape='call' requires a call context; 'bare' is the old behaviour,
+    kept so the false-edge count can be measured."""
     L = load_logs(case)
     svcs = sorted(set(L.container_name))
-    pats = {s: re.compile(rf"(?<![\w-]){re.escape(s)}(?![\w-])") for s in svcs}
+    pats = {s: (_call_shaped(s) if shape == "call" else _bare_mention(s)) for s in svcs}
     rows = Counter()
     for c, msg, rel in zip(L.container_name, L.message.fillna(""), L.rel):
         for s, rx in pats.items():
@@ -1360,9 +1372,11 @@ def step2_python(case, step1_result, rule="rule"):
                      "rank": x.rank, "role": role, "path": path, "direction_evidence": ev,
                      "topology_only": topology_only})
     out = pd.DataFrame(rows, columns=STEP2_CAND_COLS)
-    # origins, then services we cannot judge, then victims; step 1's order is kept inside each group
-    out = out.sort_values(["role", "rank"],
-                          key=lambda c: c.map({"origin": 0, "unknown": 1, "victim": 2}) if c.name == "role" else c)
+    # Option (a): keep step 1's order and demote ONLY demonstrated victims (a symptomatic dependency backed by
+    # per-case evidence). Origin and unknown keep their step-1 places, so step 2 corrects step 1 instead of
+    # replacing it, and a service we cannot judge is never promoted over one we can.
+    out["demoted"] = (out.role == "victim") & (~out.topology_only)
+    out = out.sort_values(["demoted", "rank"])
     out["rank"] = range(1, len(out) + 1)
     out["source"] = f"{step1_result['meta']['source']}+py2:{rule}"
     return {"candidates": out.reset_index(drop=True), "symptoms": syms,
