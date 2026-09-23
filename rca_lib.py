@@ -1700,14 +1700,25 @@ DIRECT_SCHEMA = {
 
 
 def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts=True, max_pat_rows=None,
-               num_predict=None, order_seed=DEFAULT_ORDER_SEED, roles_from=None, variant=""):
+               num_predict=None, order_seed=DEFAULT_ORDER_SEED, roles_from=None, graph_facts=False,
+               variant=""):
     """One call: step-0 evidence in, final answer out. Same output shape as step3_*.
     roles_from: a step-2 result whose role labels are appended WITHOUT any ranking (services in the same
     shuffled order as the evidence), to separate "ranking anchors the model" from "structure anchors it".
+    graph_facts: the call graph as plain facts (who calls whom, with the evidence behind each edge) and NO
+    interpretation - no roles, no paths, no conclusions. Separates "facts about the system help" from
+    "our conclusions hurt".
     max_pat_rows=CAPPED_PAT_ROWS gives the capped step-0 configuration."""
     thinking = thinking and model_supports_thinking(model)
     evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
                             order_seed=order_seed)
+    if graph_facts:
+        graph, _ = case_call_graph(case)
+        order = {svc: i for i, svc in enumerate(service_order(case, order_seed))}
+        g = graph.assign(_o=graph.caller.map(lambda v: order.get(v, len(order)))).sort_values(["_o", "callee"])
+        lines = [f"{e.caller} calls {e.callee} ({_edge_note(e._asdict())})" for e in g.itertuples()]
+        evidence += ("\n\n== WHO CALLS WHOM (observed in this case's traces and logs, or from the published "
+                     "architecture where stated; no interpretation) ==\n" + "\n".join(lines))
     if roles_from is not None:
         c = roles_from["candidates"]
         order = {svc: i for i, svc in enumerate(service_order(case, order_seed))}

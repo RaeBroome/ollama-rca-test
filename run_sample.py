@@ -34,7 +34,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
             w.add(case, "step2", r["meta"]["source"], r)
 
     # ---- Python step 1 (+ its Python step 2 arms)
-    for case in (cases if (staged or "roles" in direct) else []):
+    for case in cases:  # always: the control chain (python step 1/2 -> py3:top1) is the baseline every run needs
         for order in ("strength", "onset"):
             r = step1_python(case, order=order)
             s1[(case, f"python:{order}")] = r
@@ -52,6 +52,8 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                     kw = {}
                     if variant == "capped":
                         kw["max_pat_rows"] = CAPPED_PAT_ROWS
+                    elif variant == "facts":
+                        kw["graph_facts"] = True
                     elif variant == "roles":
                         kw["roles_from"] = s2.get((case, "python:strength+py2:rule"))
                         if kw["roles_from"] is None:
@@ -99,8 +101,8 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="Python arms only; makes no Ollama calls")
     ap.add_argument("--label", default="run", help="folder name suffix under results/")
     ap.add_argument("--notes", default="")
-    ap.add_argument("--direct", nargs="*", default=[], choices=["plain", "capped", "roles"],
-                    help="direct-arm variants: plain (full step-0), capped (~3k tokens), roles (+ step-2 role labels)")
+    ap.add_argument("--direct", nargs="*", default=[], choices=["plain", "capped", "roles", "facts"],
+                    help="direct variants: plain, capped (~3k tokens), roles (+ step-2 role labels), facts (+ raw call graph)")
     ap.add_argument("--direct-only", action="store_true", help="skip the staged step-1/2/3 LLM arms")
     ap.add_argument("--preset50", action="store_true", help="use the 50-case stratified sample")
     a = ap.parse_args()
