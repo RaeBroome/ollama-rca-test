@@ -78,6 +78,35 @@ python -c "from rca_lib import read_case; r = read_case('results/<run>', 're3ss_
    12k tokens. It is run with thinking off. If a new model returns empty answers, check `done_reason` — if it
    is `length` with a large `thinking` field, that is this failure mode, not a parse error.
 
+## Attribution
+
+The benchmark and all failure data are **not mine**. They are RCAEval, by Luan Pham, Hongyu Zhang, Huong Ha,
+Flora Salim and Xiuzhen Zhang, published in the Companion Proceedings of the ACM on Web Conference 2025
+(WWW 2025 Companion, pages 777–780), [arXiv:2412.17015](https://arxiv.org/abs/2412.17015).
+
+- Code and benchmark: <https://github.com/phamquiluan/RCAEval>
+- Dataset: <https://huggingface.co/datasets/phamquiluan/RCAEval> — **MIT licensed**
+- Package: <https://pypi.org/project/RCAEval>
+
+```bibtex
+@inproceedings{pham2025rcaeval,
+  title={RCAEval: A Benchmark for Root Cause Analysis of Microservice Systems with Telemetry Data},
+  author={Pham, Luan and Zhang, Hongyu and Ha, Huong and Salim, Flora and Zhang, Xiuzhen},
+  booktitle={Companion Proceedings of the ACM on Web Conference 2025},
+  pages={777--780},
+  year={2025}
+}
+```
+
+**Theirs:** the 735 failure cases, the fault injection, the ground-truth labels, and the three microservice
+systems (Online Boutique, Sock Shop, Train Ticket) the data was collected from.
+
+**Mine:** the evaluation harness in this repo — evidence compression, the pipeline steps, the scoring and run
+records — and the findings in [FINDINGS.md](FINDINGS.md). Those findings are about local models on this
+benchmark; they are not claims about RCAEval itself, and none of the RCAEval authors' methods were evaluated
+here. This repo does not redistribute the dataset: `RCAEval-data/` is git-ignored and must be downloaded from
+the link above.
+
 ## Layout
 
 - `rca_lib.py` — reviewed, stable functions: evidence compression (step 0), symptom detection (step 1),
