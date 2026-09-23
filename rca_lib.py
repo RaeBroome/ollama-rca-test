@@ -1169,13 +1169,16 @@ def trace_graph(case, inject_time=None):
     t = load_inject_time(case) if inject_time is None else inject_time
     tr = pd.read_parquet(f"{DATA_DIR}/{case}/traces.parquet",
                          columns=["traceID", "spanID", "parentSpanID", "serviceName", "startTime", "duration", "statusCode"])
+    # traces use pandas nullable Int64: NA breaks float()/mean(), so coerce first (NA duration -> 0, NA status -> 0)
+    for col in ["startTime", "duration", "statusCode"]:
+        tr[col] = pd.to_numeric(tr[col], errors="coerce").fillna(0).astype(float)
     tr["after"] = (tr.startTime / 1e6) >= t
     parent = tr[["spanID", "serviceName"]].rename(columns={"spanID": "parentSpanID", "serviceName": "caller"})
     j = tr.merge(parent, on="parentSpanID")
     j = j[j.caller != j.serviceName]
     edges = (j.groupby(["caller", "serviceName", "after"])
              .agg(calls=("spanID", "size"), err_rate=("statusCode", lambda s: float((s != 0).mean())),
-                  median_ms=("duration", lambda d: float(d.median()) / 1000.0)).reset_index())
+                  median_ms=("duration", lambda d: float(d.median() or 0) / 1000.0)).reset_index())
     # exclusive (self) latency: a span's duration minus the time its children took
     child_sum = j.groupby(["parentSpanID", "after"]).duration.sum().rename("child_us").reset_index()
     sp = tr.merge(child_sum.rename(columns={"parentSpanID": "spanID"}), on=["spanID", "after"], how="left")
@@ -1344,13 +1347,17 @@ def step2_python(case, step1_result, rule="rule"):
     cands, syms = step1_result["candidates"].copy(), step1_result["symptoms"]
     graph, excl = case_call_graph(case)
     symptomatic = set(cands.service)
+    # Which services are symptomatic comes from step 1 (step 2 corrects step 1). What KIND of symptoms a
+    # dependency has is read from step 0's evidence, not from step 1's wording: an LLM step 1 paraphrases
+    # signals, and the churn rule cannot match paraphrases. A Python arm may read data it already holds.
+    base_syms = step1_symptoms(case)
 
     def counts_as_symptomatic(svc):
         if svc not in symptomatic:
             return False
         if rule == "naive":
             return True
-        return not _is_churn_only(syms[syms.service == svc])
+        return not _is_churn_only(base_syms[base_syms.service == svc])
 
     rows = []
     for x in cands.itertuples():
