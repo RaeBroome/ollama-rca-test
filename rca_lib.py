@@ -1700,17 +1700,29 @@ DIRECT_SCHEMA = {
 
 
 def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts=True, max_pat_rows=None,
-               num_predict=None, order_seed=DEFAULT_ORDER_SEED):
-    """One call: step-0 evidence in, final answer out. Same output shape as step3_*."""
+               num_predict=None, order_seed=DEFAULT_ORDER_SEED, roles_from=None, variant=""):
+    """One call: step-0 evidence in, final answer out. Same output shape as step3_*.
+    roles_from: a step-2 result whose role labels are appended WITHOUT any ranking (services in the same
+    shuffled order as the evidence), to separate "ranking anchors the model" from "structure anchors it".
+    max_pat_rows=CAPPED_PAT_ROWS gives the capped step-0 configuration."""
     thinking = thinking and model_supports_thinking(model)
     evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
                             order_seed=order_seed)
+    if roles_from is not None:
+        c = roles_from["candidates"]
+        order = {svc: i for i, svc in enumerate(service_order(case, order_seed))}
+        labelled = c.assign(_o=c.service.map(lambda v: order.get(v, len(order)))).sort_values("_o")
+        lines = [f"{x.service}: {getattr(x, 'role', '')}"
+                 + (f" ({x.path})" if getattr(x, "path", "") and x.path != x.service else "")
+                 for x in labelled.itertuples()]
+        evidence += ("\n\n== DEPENDENCY ROLES (from tracing; NOT a ranking - services are in the same "
+                     "arbitrary order as above) ==\n" + "\n".join(lines))
     prompt = DIRECT_INSTRUCTIONS + evidence
     services = set(step0_metrics(case)[1])
     n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
     if num_predict is None:
         num_predict = answer_reserve_for(model, thinking)
-    source = f"direct:{model}{'-think' if thinking else ''}"
+    source = f"direct{('-' + variant) if variant else ''}:{model}{'-think' if thinking else ''}"
 
     attempts, data, err = [], None, None
     for _ in range(2):
@@ -1772,6 +1784,28 @@ SAMPLE12 = [  # the hand-picked inspection set: fault kinds, signal shapes, size
     ("re1ob_cartservice_loss_4", "WEAK evidence only"),
     ("re3ss_carts_f4_1", "WEAK evidence only, has logs"),
 ]
+
+
+SAMPLE50 = [  # SAMPLE12 plus a stratified spread: 6 cases per RE1/RE2 dataset, 4-6 per RE3, every fault type
+    "re1ob_adservice_cpu_1", "re1ob_adservice_delay_1", "re1ob_adservice_disk_1", "re1ob_adservice_loss_1",
+    "re1ob_adservice_mem_1", "re1ob_cartservice_loss_4",
+    "re1ss_carts_cpu_1", "re1ss_carts_cpu_2", "re1ss_carts_delay_1", "re1ss_carts_disk_1",
+    "re1ss_carts_loss_1", "re1ss_carts_mem_1",
+    "re1tt_ts-auth-service_cpu_1", "re1tt_ts-auth-service_delay_1", "re1tt_ts-auth-service_disk_1",
+    "re1tt_ts-auth-service_loss_1", "re1tt_ts-auth-service_mem_1", "re1tt_ts-order-service_cpu_1",
+    "re2ob_checkoutservice_cpu_1", "re2ob_checkoutservice_delay_1", "re2ob_checkoutservice_disk_1",
+    "re2ob_checkoutservice_disk_2", "re2ob_checkoutservice_loss_1", "re2ob_checkoutservice_mem_1",
+    "re2ss_carts_cpu_1", "re2ss_carts_delay_1", "re2ss_carts_disk_1", "re2ss_carts_loss_1",
+    "re2ss_carts_mem_1", "re2ss_user_loss_1",
+    "re2tt_ts-auth-service_cpu_1", "re2tt_ts-auth-service_delay_1", "re2tt_ts-auth-service_disk_1",
+    "re2tt_ts-auth-service_loss_1", "re2tt_ts-auth-service_mem_1", "re2tt_ts-order-service_delay_1",
+    "re3ob_adservice_f3_1", "re3ob_adservice_f4_1", "re3ob_cartservice_f1_1", "re3ob_emailservice_f2_1",
+    "re3ss_carts_f1_1", "re3ss_carts_f3_1", "re3ss_carts_f4_1", "re3ss_front-end_f1_1",
+    "re3ss_orders_f1_1", "re3ss_orders_f3_1",
+    "re3tt_ts-auth-service_f1_1", "re3tt_ts-auth-service_f2_1", "re3tt_ts-auth-service_f3_1",
+    "re3tt_ts-auth-service_f4_1",
+]
+CAPPED_PAT_ROWS = 10  # the capped step-0 configuration
 
 
 def git_state():
