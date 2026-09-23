@@ -26,6 +26,7 @@ Evaluating local Ollama models (qwen2.5-coder:7b, gemma4:26b) on root cause anal
 ## Code
 - Stable functions: `rca_lib.py` (reviewed; the notebook imports them). Exploration: `explore.ipynb`. Keep notebook outputs cleared in the saved file.
 - Inspect one case: `python rca_lib.py inspect <case>` (the `inspect-case` skill).
+- Reproduce a run: `python run_sample.py --label <name>` (add `--no-llm` for the Python arms only, `--cases <ids>` for a subset). Orchestration lives in the repo; only genuine scratch belongs in temp. Each run's `metadata.json` records the git commit, branch and whether the working tree was dirty.
 - The step-0 text given to a model must stay ground-truth blind: no case name, fault label, or root-cause marker. Service order is shuffled per case (`DEFAULT_ORDER_SEED`, recorded per run), because alphabetical order is not neutral.
 - Update CLAUDE.md when renaming anything it references.
 

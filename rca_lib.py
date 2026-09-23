@@ -1668,6 +1668,36 @@ def step3_llm(case, step2_result, model="qwen2.5-coder:7b", thinking=False, num_
 #   summary.csv        one row per case per arm, openable in any spreadsheet
 #   metadata.json      step versions, thresholds, seed, models, timings, GPU
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+MODELS_DEFAULT = ("qwen2.5-coder:7b", "gemma4:26b")
+SAMPLE12 = [  # the hand-picked inspection set: fault kinds, signal shapes, sizes, and 2 weak-evidence cases
+    ("re3ss_carts_f1_1", "RE3 redeploy, WARN signal"),
+    ("re3ss_carts_f3_1", "RE3 same signature as f1"),
+    ("re3ss_orders_f1_1", "RE3 obvious exception"),
+    ("re3ss_orders_f3_1", "RE3 subtle INFO line"),
+    ("re3ss_front-end_f1_1", "RE3 rate-only (pattern pre-exists)"),
+    ("re2ss_user_loss_1", "loss, latency goes quiet"),
+    ("re1ob_adservice_mem_1", "metrics only, small prompt"),
+    ("re2ob_checkoutservice_disk_1", "disk, diskio-appears artifact"),
+    ("re1tt_ts-order-service_cpu_1", "TrainTicket, metrics only"),
+    ("re2tt_ts-order-service_delay_1", "TrainTicket, large prompt"),
+    ("re1ob_cartservice_loss_4", "WEAK evidence only"),
+    ("re3ss_carts_f4_1", "WEAK evidence only, has logs"),
+]
+
+
+def git_state():
+    """Commit and working-tree state at run time, so a result can be traced to the code that produced it."""
+    import subprocess
+    def g(*args):
+        try:
+            return subprocess.run(["git", *args], cwd=Path(__file__).resolve().parent,
+                                  capture_output=True, text=True, timeout=30).stdout.strip()
+        except Exception:
+            return ""
+    dirty = g("status", "--porcelain")
+    return {"commit": g("rev-parse", "HEAD"), "branch": g("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty": bool(dirty),
+            "dirty_files": [l[2:].strip() for l in dirty.splitlines()][:20]}  # porcelain: 2 status chars, then path
 
 
 def start_run(label, notes=""):
@@ -1688,6 +1718,7 @@ class RunWriter:
         self.notes = notes
         self.n = 0
         self.t0 = time.time()
+        self.git = git_state()  # recorded at run START; finalize records it again in case it changed
         self._summary_header = False
 
     def _append_jsonl(self, name, rows):
@@ -1751,6 +1782,7 @@ class RunWriter:
                 f.unlink()
         gpu = gpu_memory_mb()
         meta = {"written_at": time.strftime("%Y-%m-%d %H:%M:%S"), "notes": self.notes,
+                "git": self.git, "git_at_finalize": git_state(),
                 "versions": {"step0": STEP0_VERSION, "step1": STEP1_VERSION, "step2": STEP2_VERSION,
                              "step3": STEP3_VERSION, "thresholds": THRESHOLDS_VERSION},
                 "thresholds": THRESHOLDS, "evidence_thresholds": EVIDENCE_THRESHOLDS,
