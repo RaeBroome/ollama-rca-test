@@ -16,12 +16,12 @@ keeps everything produced up to that point.
 import argparse
 import time
 
-from rca_lib import (MODELS_DEFAULT, SAMPLE12, ensure_only, start_run, step1_llm, step1_python,
-                     step2_llm, step2_python, step3_llm, step3_python)
+from rca_lib import (MODELS_DEFAULT, SAMPLE12, direct_llm, ensure_only, start_run, step1_llm,
+                     step1_python, step2_llm, step2_python, step3_llm, step3_python)
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
-        step3_rules=("top1", "role")):
+        step3_rules=("top1", "role"), staged=True, direct=False):
     w = start_run(label, notes=notes or f"{len(cases)} cases, models={models if use_llm else 'none'}")
     print("run dir:", w.dir, flush=True)
     t0 = time.time()
@@ -34,7 +34,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
             w.add(case, "step2", r["meta"]["source"], r)
 
     # ---- Python step 1 (+ its Python step 2 arms)
-    for case in cases:
+    for case in cases if staged else []:
         for order in ("strength", "onset"):
             r = step1_python(case, order=order)
             s1[(case, f"python:{order}")] = r
@@ -48,6 +48,13 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
             ensure_only(model)
             tag = "qwen" if "qwen" in model else "gemma"
             for case in cases:
+                if direct:  # one call: step-0 evidence straight to a final answer, no Python ranking
+                    rd = direct_llm(case, model=model, thinking=False)
+                    w.add(case, "direct", rd["meta"]["source"], rd)
+                    print(f"direct {tag} {case:32s} answer={rd['meta']['answer']} "
+                          f"{rd['meta']['attempts'][-1]['wall_s']}s", flush=True)
+                if not staged:
+                    continue
                 r = step1_llm(case, model=model, thinking=False)
                 s1[(case, tag)] = r
                 w.add(case, "step1", r["meta"]["source"], r)
@@ -64,7 +71,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                 print(f"{tag} {case:32s} {time.time() - t0:.0f}s", flush=True)
 
     # ---- Python step 3 on every chain (free)
-    for (case, chain), r2 in list(s2.items()):
+    for (case, chain), r2 in (list(s2.items()) if staged else []):
         for rule in step3_rules:
             r3 = step3_python(case, r2, rule=rule)
             w.add(case, "step3", r3["meta"]["source"], r3)
@@ -84,9 +91,12 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="Python arms only; makes no Ollama calls")
     ap.add_argument("--label", default="run", help="folder name suffix under results/")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--direct", action="store_true", help="also run the direct arm (step-0 evidence -> answer)")
+    ap.add_argument("--direct-only", action="store_true", help="only the direct arm")
     a = ap.parse_args()
     cases = a.cases or [c for c, _ in SAMPLE12]
-    run(cases, a.models, a.label, notes=a.notes, use_llm=not a.no_llm)
+    run(cases, a.models, a.label, notes=a.notes, use_llm=not a.no_llm,
+        staged=not a.direct_only, direct=a.direct or a.direct_only)
 
 
 if __name__ == "__main__":

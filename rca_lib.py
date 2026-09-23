@@ -1659,6 +1659,95 @@ def step3_llm(case, step2_result, model="qwen2.5-coder:7b", thinking=False, num_
     row = cands[cands.service == answer].iloc[0]
     return {**_step3_result(case, source, answer, conf, why, row=row, extra=extra), "symptoms": syms}
 
+
+# ============================================================ direct arm: step-0 evidence straight to the model
+# No Python ranking, no symptom detection, no tracing: can the model do the whole job from the evidence?
+# It is asked for the signals it used, so retention stays measurable and comparable with the staged arms.
+DIRECT_VERSION = "direct-v0.1"
+
+DIRECT_INSTRUCTIONS = """You are diagnosing a fault in a microservice system. A fault started at t=0.
+
+Below is a summary of everything that changed after t=0, for every service, in no particular order.
+
+Name the ONE service where the fault ORIGINATED. A service that calls a broken dependency also shows
+symptoms (errors, latency, retries) but is a victim, not the origin. When a service restarts or fails, its
+datastore logs connection churn - that does not make the datastore the origin.
+
+If the evidence does not support any single service, answer "none": an honest abstention is better than a
+guess, and abstentions are scored separately from wrong answers.
+
+Answer with JSON only:
+{"answer": "<service name, or none>", "confidence": "high|medium|low",
+ "justification": "<one sentence>",
+ "signals": [{"service": "<name>", "signal": "<copy the metric or log pattern you used>",
+              "kind": "shape|presence|error_rate|log_new|log_vanished|log_rate|quiet"}]}
+
+Use only service names from the evidence. List at most 5 signals.
+
+EVIDENCE:
+"""
+
+DIRECT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"}, "confidence": {"type": "string"}, "justification": {"type": "string"},
+        "signals": {"type": "array", "items": {"type": "object", "properties": {
+            "service": {"type": "string"}, "signal": {"type": "string"}, "kind": {"type": "string"}},
+            "required": ["service", "signal"]}},
+    },
+    "required": ["answer", "confidence", "justification"],
+}
+
+
+def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts=True, max_pat_rows=None,
+               num_predict=None, order_seed=DEFAULT_ORDER_SEED):
+    """One call: step-0 evidence in, final answer out. Same output shape as step3_*."""
+    thinking = thinking and model_supports_thinking(model)
+    evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
+                            order_seed=order_seed)
+    prompt = DIRECT_INSTRUCTIONS + evidence
+    services = set(step0_metrics(case)[1])
+    n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
+    if num_predict is None:
+        num_predict = answer_reserve_for(model, thinking)
+    source = f"direct:{model}{'-think' if thinking else ''}"
+
+    attempts, data, err = [], None, None
+    for _ in range(2):
+        r = ollama_chat(model, prompt, num_ctx_for(n_tok, model, thinking), thinking=thinking,
+                        num_predict=num_predict, schema=DIRECT_SCHEMA)
+        attempts.append(r["meta"] | {"thinking_chars": r["thinking_chars"], "content_chars": len(r["content"])})
+        try:
+            data = _parse_json_block(r["content"])
+            break
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    extra = {"prompt_tokens": n_tok, "evidence_tokens": count_tokens(evidence, "qwen" if "qwen" in model else "gemma"),
+             "attempts": attempts, "parse_error": err if data is None else None, "order_seed": order_seed}
+    empty = pd.DataFrame(columns=SYMPTOM_COLS)
+    if data is None:
+        return {**_step3_result(case, source, None, "none", "unparseable answer", abstained=True, extra=extra),
+                "symptoms": empty}
+
+    # the signals it says it used, so retention is comparable with the staged arms
+    sym_rows = [{"case": case, "source": source, "service": str(x.get("service", "")),
+                 "signal": str(x.get("signal", ""))[:160], "kind": str(x.get("kind", "")), "strength": "",
+                 "onset_s": None, "size": "", "size_num": np.nan, "artifact_flag": "", "reason": ""}
+                for x in (data.get("signals") or [])[:8]]
+    syms = pd.DataFrame(sym_rows, columns=SYMPTOM_COLS)
+    answer = str(data.get("answer", "")).strip()
+    conf = str(data.get("confidence", ""))[:10]
+    why = str(data.get("justification", ""))[:300]
+    if normalize_service(answer) in ("none", "", "unknown"):
+        return {**_step3_result(case, source, None, conf or "none", why or "model abstained", abstained=True,
+                                extra=extra), "symptoms": syms}
+    if answer not in services:
+        extra["unknown_services"] = [answer]
+        return {**_step3_result(case, source, None, conf,
+                                f"model named a service that is not in this system: {answer}",
+                                abstained=True, extra=extra), "symptoms": syms}
+    return {**_step3_result(case, source, answer, conf, why, extra=extra), "symptoms": syms}
+
 # ============================================================ run records (results/<timestamp>-<label>/)
 # Every run writes its own folder, so re-runs never overwrite earlier results:
 #   step1.parquet      one row per candidate per arm
@@ -1784,7 +1873,7 @@ class RunWriter:
         meta = {"written_at": time.strftime("%Y-%m-%d %H:%M:%S"), "notes": self.notes,
                 "git": self.git, "git_at_finalize": git_state(),
                 "versions": {"step0": STEP0_VERSION, "step1": STEP1_VERSION, "step2": STEP2_VERSION,
-                             "step3": STEP3_VERSION, "thresholds": THRESHOLDS_VERSION},
+                             "step3": STEP3_VERSION, "direct": DIRECT_VERSION, "thresholds": THRESHOLDS_VERSION},
                 "thresholds": THRESHOLDS, "evidence_thresholds": EVIDENCE_THRESHOLDS,
                 "step0_params": STEP0_PARAMS, "borderline_margin": BORDERLINE_MARGIN,
                 "order_seed": DEFAULT_ORDER_SEED, "answer_reserve": ANSWER_RESERVE,
