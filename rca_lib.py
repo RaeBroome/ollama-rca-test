@@ -1142,7 +1142,7 @@ def step1_sheet(case, results, checks=RETENTION_CHECKS, top_n=5):
 # ============================================================ step 2: symptom -> origin (tracing)
 # Step 2 sees ONLY step 1's output plus a dependency block (decided), so step 1's retention differences stay
 # visible. Output is the step 1 shape plus role / path / direction_evidence.
-STEP2_VERSION = "step2-v0.1"
+STEP2_VERSION = "step2-v0.2-label-only"
 STEP2_CAND_COLS = CANDIDATE_COLS + ["role", "path", "direction_evidence", "topology_only"]
 
 # A datastore whose only symptoms are connection/socket churn is NOT treated as an origin by the "rule" arm:
@@ -1379,16 +1379,16 @@ def step2_python(case, step1_result, rule="rule"):
                      "rank": x.rank, "role": role, "path": path, "direction_evidence": ev,
                      "topology_only": topology_only})
     out = pd.DataFrame(rows, columns=STEP2_CAND_COLS)
-    # Option (a): keep step 1's order and demote ONLY demonstrated victims (a symptomatic dependency backed by
-    # per-case evidence). Origin and unknown keep their step-1 places, so step 2 corrects step 1 instead of
-    # replacing it, and a service we cannot judge is never promoted over one we can.
-    out["demoted"] = (out.role == "victim") & (~out.topology_only)
-    out = out.sort_values(["demoted", "rank"])
-    out["rank"] = range(1, len(out) + 1)
+    # LABEL-ONLY (measured: re-ranking helped 16 runs and hurt 51 of 120). Step 1's order is left untouched;
+    # role / path / direction_evidence are attached for step 3 to weigh. would_demote records what the
+    # re-ranking version would have done, so the decision stays measurable.
+    out["would_demote"] = (out.role == "victim") & (~out.topology_only)
+    out = out.sort_values("rank")
     out["source"] = f"{step1_result['meta']['source']}+py2:{rule}"
     return {"candidates": out.reset_index(drop=True), "symptoms": syms,
             "meta": {"case": case, "source": out.source.iloc[0] if len(out) else f"py2:{rule}",
-                     "step2_version": STEP2_VERSION, "rule": rule, "step1_source": step1_result["meta"]["source"],
+                     "step2_version": STEP2_VERSION, "rule": rule, "label_only": True,
+                     "step1_source": step1_result["meta"]["source"],
                      "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0,
                      "wall_s": round(time.time() - t0, 2)}}
 
@@ -1459,63 +1459,34 @@ def step2_llm(case, step1_result, model="qwen2.5-coder:7b", thinking=False, num_
             err = f"{type(e).__name__}: {e}"
     meta = {"case": case, "source": source, "step2_version": STEP2_VERSION, "step1_source": step1_result["meta"]["source"],
             "prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None,
-            "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0}
+            "label_only": True, "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0}
     if data is None:
         return {"candidates": pd.DataFrame(columns=STEP2_CAND_COLS), "symptoms": syms, "meta": meta}
 
-    unknown, rows, seen = [], [], set()
+    unknown, seen = [], set()
+    labels = {}  # service -> (role, path, why) as judged by the model
     for o in data.get("origins", [])[:5]:
         svc = str(o.get("service", ""))
         if svc not in services:
             unknown.append(svc)
-        seen.add(svc)
-        base = cands[cands.service == svc]
-        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": svc,
-                     "reason": str(o.get("why", ""))[:300],
-                     "n_signals": int(base.n_signals.iloc[0]) if len(base) else 0,
-                     "first_onset_s": base.first_onset_s.iloc[0] if len(base) else np.nan,
-                     "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
-                     "role": "origin", "path": str(o.get("path", ""))[:120],
-                     "direction_evidence": "model judgement", "topology_only": False})
+        labels.setdefault(svc, ("origin", str(o.get("path", ""))[:120], str(o.get("why", ""))[:300]))
     for v in data.get("victims", [])[:10]:
         svc = str(v.get("service", ""))
         if svc not in services:
             unknown.append(svc)
-        if svc in seen:
-            continue
-        seen.add(svc)
-        base = cands[cands.service == svc]
-        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": svc,
-                     "reason": str(v.get("why", ""))[:300],
-                     "n_signals": int(base.n_signals.iloc[0]) if len(base) else 0,
-                     "first_onset_s": base.first_onset_s.iloc[0] if len(base) else np.nan,
-                     "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
-                     "role": "victim", "path": f"{svc} -> {v.get('of_service', '?')}",
-                     "direction_evidence": "model judgement", "topology_only": False})
+        labels.setdefault(svc, ("victim", f"{svc} -> {v.get('of_service', '?')}", str(v.get("why", ""))[:300]))
     for u in data.get("insufficient_evidence", [])[:10]:
         svc = str(u.get("service", ""))
         if svc not in services:
             unknown.append(svc)
-        if svc in seen:
-            continue
-        seen.add(svc)
-        base = cands[cands.service == svc]
-        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": svc,
-                     "reason": str(u.get("why", ""))[:300],
-                     "n_signals": int(base.n_signals.iloc[0]) if len(base) else 0,
-                     "first_onset_s": base.first_onset_s.iloc[0] if len(base) else np.nan,
-                     "has_clear": bool(base.has_clear.iloc[0]) if len(base) else False, "artifact_only": False,
-                     "role": "unknown", "path": svc, "direction_evidence": "model: insufficient evidence",
-                     "topology_only": False})
-    # never drop a step-1 candidate the model did not mention: keep it below, in step 1 order
+        labels.setdefault(svc, ("unknown", svc, str(u.get("why", ""))[:300]))
+
+    # LABEL-ONLY: step 1's order is kept; the model's judgement becomes role / path / direction_evidence.
+    rows = []
     for x in cands.itertuples():
-        if x.service in seen:
-            continue
-        rows.append({"case": case, "source": source, "rank": len(rows) + 1, "service": x.service,
-                     "reason": "not mentioned by the model; kept from step 1", "n_signals": x.n_signals,
-                     "first_onset_s": x.first_onset_s, "has_clear": x.has_clear, "artifact_only": x.artifact_only,
-                     "role": "unlisted", "path": x.service, "direction_evidence": "carried over from step 1",
-                     "topology_only": False})
+        role, path, why = labels.get(x.service, ("unlisted", x.service, "not mentioned by the model"))
+        rows.append({**{c: getattr(x, c) for c in CANDIDATE_COLS}, "role": role, "path": path,
+                     "direction_evidence": why, "topology_only": False})
     meta["unknown_services"] = sorted(set(unknown))
     return {"candidates": pd.DataFrame(rows, columns=STEP2_CAND_COLS), "symptoms": syms, "meta": meta}
 

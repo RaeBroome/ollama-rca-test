@@ -8,6 +8,8 @@ Evaluating local Ollama models (qwen2.5-coder:7b, gemma4:26b) on root cause anal
 - Compression tuned for the model can destroy signals our own rules need. Step 0's templating masked `"msg":"connection accepted"`, `"exception":"java.lang...."`, `"statusCode":500` and `method=Authorise`, so step 2's connection-churn rule could never fire. When adding a rule that reads templated text, check what the templating already removed (`ALWAYS_KEEP_KEYS`), and prefer reading the raw field.
 - Principle: filtering/compression must not collapse subtle symptoms (slow drifts, rate changes, services going quiet, WARN lines, sparse errors, one-off/rare lines, exception class names). Flag any filter or threshold that could hide one; never skip cases or rows silently.
 - Thresholds are provisional; don't tune them on the cases being inspected.
+- Any step-0 change invalidates existing step-1 and step-2 numbers: re-baseline before comparing. (Keeping `msg`/`exception`/`statusCode` in log templates moved qwen's step-1 recall@1 from 50% to 40% on the same 12 cases, same seed, temperature 0.)
+- Step 2 is label-only: it attaches `role`, `path` and `direction_evidence` to step 1's ranking and never reorders. Re-ranking was measured over 120 runs: 16 better, 53 unchanged, 51 worse. `would_demote` records what re-ranking would have done.
 - Scoring: exact match, case-insensitive, trimmed (`rca_lib.is_correct`). Never substring match.
 - Report "clear" and "weak evidence" cases as separate scores. Run scores with and without `diskio_appears` evidence (likely injection artifact).
 - Step 0 has two configurations: unranked (`num_ctx` per case, tests the model's own narrowing) and capped at ~3k tokens with a swappable ranking step. Both run on all datasets, including TrainTicket.
