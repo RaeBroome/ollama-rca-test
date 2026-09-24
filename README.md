@@ -44,6 +44,11 @@ Useful flags: `--cases <ids>`, `--preset50` (50-case stratified sample), `--mode
 {plain,capped,roles,facts}`, `--direct-only` (skip the staged LLM arms). Model calls are batched by model,
 so a run swaps models a few times, not once per case.
 
+**The default 12-case preset is for checking that a model works, not for drawing conclusions.** One case is
+worth 8 points there, and both of its headline results reversed at 50 cases: qwen scored 80% on 12 (8 correct
+of 10 clear cases) and 67% on 50, while gemma looked clearly worse than qwen on 12 and turned out level or
+ahead on 50. Use `--preset50` for any number you intend to compare or quote.
+
 Inspect a single case, including the exact text a model receives:
 
 ```bash
