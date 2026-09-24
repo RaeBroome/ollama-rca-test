@@ -56,7 +56,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
     if use_llm:
         for model in models:
             ensure_only(model)
-            tag = "qwen" if "qwen" in model else "gemma"
+            tag = model.split("/")[-1].split(":")[0]  # any model, not just our two
             for case in cases:
                 for variant in direct:  # step-0 evidence straight to a final answer, no Python ranking
                     kw = {}

@@ -913,13 +913,27 @@ EVIDENCE:
 
 
 def ollama_unload(model):
-    """Free a model's VRAM. Call this for OTHER models BEFORE a run: with a second model still resident the
-    first call is slow and may spill to CPU (both of ours cannot fit on a 20 GB card at once)."""
+    """Free a model's VRAM. Returns True if the request succeeded. A model that is not installed (404) or an
+    unreachable server is not an error here: there is nothing to unload."""
     import urllib.request
     body = {"model": model, "prompt": "hi", "stream": False, "keep_alive": 0, "options": {"num_predict": 1}}
     req = urllib.request.Request("http://127.0.0.1:11434/api/generate", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=600).read()
+    try:
+        urllib.request.urlopen(req, timeout=600).read()
+        return True
+    except Exception:
+        return False
+
+
+def ollama_installed():
+    """Models this Ollama has pulled, or [] if it cannot be reached."""
+    import urllib.request
+    try:
+        tags = json.loads(urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=60).read())
+        return [m["name"] for m in tags.get("models", [])]
+    except Exception:
+        return []
 
 
 def ollama_loaded():
@@ -930,10 +944,14 @@ def ollama_loaded():
         return []
 
 
-def ensure_only(model, others=("qwen2.5-coder:7b", "gemma4:26b")):
-    """Unload every other known model before running `model`."""
-    for m in others:
-        if m != model:
+def ensure_only(model, others=None):
+    """Unload every OTHER installed model before running `model`, so the first call is not slowed by another
+    model still holding VRAM. Only models this Ollama actually has are touched: hardcoding our two defaults
+    made every run fail on a machine that has neither."""
+    installed = set(ollama_installed())
+    candidates = set(others) if others is not None else (installed | set(MODELS_DEFAULT))
+    for m in sorted(candidates):
+        if m != model and m in installed:
             ollama_unload(m)
 
 
@@ -953,6 +971,7 @@ def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout
     """One chat call at temperature 0. Records free GPU memory before the call (see gpu_memory_mb) and checks
     prompt_eval_count for silent truncation. Answers come from message.content only, never thinking.
     `thinking` is ignored (and recorded as unsupported) for models without the thinking capability."""
+    import urllib.error
     import urllib.request
     gpu_before = gpu_memory_mb()
     supported = model_supports_thinking(model)
@@ -965,13 +984,23 @@ def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout
     req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
-    r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    fallback = ""
+    try:
+        r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    except urllib.error.HTTPError as e:
+        if e.code != 400 or schema is None:
+            raise
+        body.pop("format", None)  # older Ollama versions reject structured output; answers are parsed leniently
+        fallback = "server rejected `format`; retried without structured output"
+        req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
     wall = time.time() - t0
     msg = r.get("message", {})
     expected = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
     ok, note = check_prompt_eval(expected, r.get("prompt_eval_count"))
     return {"content": msg.get("content") or "", "thinking_chars": len(msg.get("thinking") or ""),
-            "meta": {"model": model, "thinking": thinking and supported,
+            "meta": {"model": model, "thinking": thinking and supported, "fallback": fallback,
                      "thinking_supported": supported, "num_ctx": num_ctx, "wall_s": round(wall, 2),
                      "prompt_tokens_expected": expected, "prompt_eval_count": r.get("prompt_eval_count"),
                      "eval_count": r.get("eval_count"), "done_reason": r.get("done_reason"),
