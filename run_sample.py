@@ -20,14 +20,13 @@ fit on a 20 GB card together). Records are written incrementally, so a crash
 keeps everything produced up to that point.
 """
 import argparse
-import json
 import time
-import urllib.request
 from pathlib import Path
 
 from rca_lib import (ANSWER_RESERVE, CAPPED_PAT_ROWS, DATA_DIR, MODELS_DEFAULT, SAMPLE12, SAMPLE50,
                      answer_reserve_for, direct_llm, ensure_only, gpu_memory_mb, model_supports_thinking,
-                     start_run, step1_llm, step1_python, step2_llm, step2_python, step3_llm, step3_python)
+                     ollama_models, ollama_url, ollama_version, resolve_model, start_run, step1_llm,
+                     step1_python, step2_llm, step2_python, step3_llm, step3_python)
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
@@ -103,52 +102,76 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
     return w.dir
 
 
-def _ollama_tags():
-    return json.loads(urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=30).read())
+def _print_installed(installed):
+    if not installed:
+        print("              (none installed - pull one, e.g. `ollama pull qwen2.5-coder:7b`)")
+        return
+    print("              installed models:")
+    for m in installed:
+        print(f"                {m['name']:32s} {m['size_gb']:>6.1f} GB")
 
 
 def quickstart(models, case="re3ss_carts_f1_1"):
-    """Check the setup, time one case, and print the commands for a real run. Runs one case only."""
+    """Check the setup, time one case, and print the commands for a real run. Runs one case only.
+    Everything here degrades: a missing endpoint, tool or model is reported, never raised."""
     print("== checking the setup\n")
-    ok = True
 
-    try:
-        tags = _ollama_tags()
-        have = sorted({m["name"] for m in tags.get("models", [])})
-        print(f"  Ollama      reachable, {len(have)} model(s) installed")
-    except Exception as e:
-        print(f"  Ollama      NOT reachable at http://127.0.0.1:11434 ({type(e).__name__}).")
-        print("              Start it with `ollama serve`, then run this again.")
+    version = ollama_version()
+    installed = ollama_models()
+    if not installed and version is None:
+        print(f"  Ollama      NOT reachable at {ollama_url()}")
+        print("              Start it (`ollama serve`), or set OLLAMA_HOST if it runs elsewhere,")
+        print("              e.g. OLLAMA_HOST=192.168.1.10:11434")
         return
-    missing = [m for m in models if m not in have and f"{m}:latest" not in have]
+    print(f"  Ollama      {ollama_url()}" + (f", version {version}" if version else ", version unknown (older build)"))
+
+    if not models:  # --models omitted: show the options rather than assuming ours
+        print(f"  models      no --models given.")
+        _print_installed(installed)
+        chosen = [m for m in MODELS_DEFAULT if resolve_model(m)]
+        if not chosen:
+            print("\n  Pick one from the list and run:")
+            print("    python run_sample.py --quickstart --models <model>")
+            return
+        models = chosen
+        print(f"              defaulting to: {', '.join(models)}")
+
+    resolved, missing = [], []
     for m in models:
-        print(f"  model       {m}: {'installed' if m not in missing else 'NOT INSTALLED -> ollama pull ' + m}")
-    ok = ok and not missing
+        r = resolve_model(m)
+        (resolved.append(r) if r else missing.append(m))
+        print(f"  model       {m}: {'installed' if r else 'NOT INSTALLED'}" + (f" (as {r})" if r and r != m else ""))
+    if missing:
+        print(f"              pull it with: ollama pull {missing[0]}")
+        _print_installed(installed)
+        return
+    models = resolved
 
     data = Path(DATA_DIR)
     if (data / "cases.parquet").exists():
-        n = len(list(data.glob("re*"))) if data.exists() else 0
-        print(f"  dataset     {data} ({n} case folders)")
+        print(f"  dataset     {data} ({len(list(data.glob('re*')))} case folders)")
     else:
         print(f"  dataset     NOT FOUND at {data}")
-        print("              Download RCAEval from https://huggingface.co/datasets/phamquiluan/RCAEval")
-        ok = False
+        print("              Download RCAEval from https://huggingface.co/datasets/phamquiluan/RCAEval,")
+        print("              or point RCA_DATA_DIR at an existing copy.")
+        return
 
     gpu = gpu_memory_mb()
-    print(f"  GPU         {gpu[0]} MB free of {gpu[2]} MB" if gpu else "  GPU         no nvidia-smi (CPU or non-NVIDIA; expect slower calls)")
-
-    if not ok:
-        print("\nFix the items above, then run --quickstart again.")
-        return
+    print(f"  GPU         {gpu[0]} MB free of {gpu[2]} MB" if gpu
+          else "  GPU         not detected (no nvidia-smi or rocm-smi). Fine - it is only recorded with each\n"
+               "              result to show whether a run spilled to CPU; expect slower calls on CPU.")
 
     print()
     for m in models:
         thinking = model_supports_thinking(m)
         known = m in ANSWER_RESERVE
-        print(f"  {m}: thinking capability = {thinking}"
-              + ("  (gemma-style thinking may never converge; this harness runs thinking off)" if thinking else ""))
+        print(f"  {m}: thinking capability = {thinking}")
+        if thinking:
+            print(f"  {' ' * len(m)}  runs with thinking OFF. Some thinking models never stop reasoning on these")
+            print(f"  {' ' * len(m)}  prompts (gemma4:26b produced 52k characters and no answer). If answers come")
+            print(f"  {' ' * len(m)}  back empty, check done_reason=length with a large thinking field.")
         print(f"  {' ' * len(m)}  answer reserve = {answer_reserve_for(m)} tokens"
-              + ("" if known else f"  (unknown model, using the default; add an entry to ANSWER_RESERVE in rca_lib.py to change it)"))
+              + ("" if known else "  (unknown model, using the default; add to ANSWER_RESERVE in rca_lib.py to change)"))
 
     print(f"\n== timing one case ({case}), cold then warm\n")
     timings = {}
@@ -164,6 +187,10 @@ def quickstart(models, case="re3ss_carts_f1_1"):
         timings[m] = warm
         print(f"  {m}: {cold:.1f}s cold (includes load), {warm:.1f}s warm  "
               f"(prompt {r['meta']['prompt_tokens']} tokens, num_ctx {a['num_ctx']}, answer {r['meta']['answer']})")
+        if a.get("fallback"):
+            print(f"  {' ' * len(m)}  server compatibility: {a['fallback']}")
+        if r["meta"].get("parse_error"):
+            print(f"  {' ' * len(m)}  could not parse the answer: {r['meta']['parse_error']}")
 
     per_call = sum(timings.values())
     print("\n== rough estimates, from the WARM time on this one case\n")
@@ -188,7 +215,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cases", nargs="*", help="case ids (default: the --preset sample)")
     ap.add_argument("--preset", default="sample12", choices=["sample12"], help="named case set")
-    ap.add_argument("--models", nargs="*", default=list(MODELS_DEFAULT))
+    ap.add_argument("--models", nargs="*", default=None,
+                    help="models to use; omit with --quickstart to list what is installed")
     ap.add_argument("--no-llm", action="store_true", help="Python arms only; makes no Ollama calls")
     ap.add_argument("--label", default="run", help="folder name suffix under results/")
     ap.add_argument("--notes", default="")
@@ -200,11 +228,12 @@ def main():
                     help="check the setup, time one case, print run commands and estimates, then stop")
     a = ap.parse_args()
     if a.quickstart:
-        quickstart(a.models, case=(a.cases or ["re3ss_carts_f1_1"])[0])
+        quickstart(a.models or [], case=(a.cases or ["re3ss_carts_f1_1"])[0])
         return
+    models = a.models or list(MODELS_DEFAULT)
     cases = a.cases or (SAMPLE50 if a.preset50 else [c for c, _ in SAMPLE12])
     direct = a.direct or (["plain"] if a.direct_only else [])
-    run(cases, a.models, a.label, notes=a.notes, use_llm=not a.no_llm,
+    run(cases, models, a.label, notes=a.notes, use_llm=not a.no_llm,
         staged=not a.direct_only, direct=direct)
 
 

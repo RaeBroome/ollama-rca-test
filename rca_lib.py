@@ -754,14 +754,44 @@ def num_ctx_for(prompt_tokens, model=None, thinking=False, answer_reserve=None, 
 
 
 def gpu_memory_mb():
-    """(free, used, total) MiB from nvidia-smi, or None. Sample this right before every timed model run and
-    record it with the result: Ollama 0.34.2's /api/ps returns an empty model list, so there is no GPU/CPU
-    split from the API, and a spill can only be spotted afterwards from free memory plus throughput."""
+    """(free, used, total) MiB, or None when no supported GPU tool is present (CPU-only, Apple silicon, or a
+    vendor we do not read). Sample this right before every timed model run and record it with the result:
+    /api/ps gives no GPU/CPU split on some Ollama versions, so a spill is only visible afterwards from free
+    memory plus throughput. Missing tools are normal, not an error."""
+    return (_gpu_nvidia() or _gpu_amd())
+
+
+def _gpu_nvidia():
     import subprocess
     try:
         out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free,memory.used,memory.total",
                               "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=30).stdout
         return tuple(int(x) for x in out.strip().splitlines()[0].split(","))
+    except Exception:
+        return None
+
+
+def _gpu_amd():
+    """Best effort for AMD via rocm-smi. Untested here (no AMD hardware available); a failure just yields
+    None, which callers already handle."""
+    import subprocess
+    try:
+        out = subprocess.run(["rocm-smi", "--showmeminfo", "vram", "--json"],
+                             capture_output=True, text=True, timeout=30).stdout
+        data = json.loads(out)
+        card = next(iter(data.values()))
+        total = used = None
+        for k, v in card.items():
+            kl = k.lower()
+            if "total" in kl and "vram" in kl:
+                total = int(v)
+            elif "used" in kl and "vram" in kl:
+                used = int(v)
+        if total is None:
+            return None
+        used = used or 0
+        mib = 1024 * 1024
+        return (int((total - used) / mib), int(used / mib), int(total / mib))
     except Exception:
         return None
 
@@ -912,6 +942,64 @@ EVIDENCE:
 """
 
 
+def ollama_url(path=""):
+    """Base URL from OLLAMA_HOST (same variable the ollama CLI uses), accepting `host:port` or a full URL.
+    Not everyone runs Ollama on localhost:11434."""
+    h = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").strip()
+    if not h.startswith(("http://", "https://")):
+        h = "http://" + h
+    return h.rstrip("/") + path
+
+
+def _ollama_call(path, payload=None, timeout=60):
+    import urllib.request
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(ollama_url(path), data=data, headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+
+
+def _ollama_try(path, payload=None, timeout=60):
+    """None if the endpoint is missing, the server is unreachable, or the response is not JSON.
+    Endpoints differ between Ollama versions, so every optional call goes through here."""
+    try:
+        return _ollama_call(path, payload, timeout)
+    except Exception:
+        return None
+
+
+def ollama_version():
+    v = _ollama_try("/api/version", timeout=15)
+    return (v or {}).get("version")
+
+
+def ollama_models():
+    """[{name, size_gb}] for installed models, [] if unreachable. Tolerates the `name` / `model` key
+    difference between Ollama versions."""
+    tags = _ollama_try("/api/tags", timeout=30) or {}
+    out = []
+    for m in tags.get("models", []) or []:
+        name = m.get("name") or m.get("model")
+        if name:
+            out.append({"name": name, "size_gb": round((m.get("size") or 0) / 1e9, 1)})
+    return sorted(out, key=lambda d: d["name"])
+
+
+def ollama_installed():
+    return [m["name"] for m in ollama_models()]
+
+
+def resolve_model(name):
+    """The installed model matching `name`, allowing the implicit `:latest` tag. None if absent."""
+    have = ollama_installed()
+    if name in have:
+        return name
+    if f"{name}:latest" in have:
+        return f"{name}:latest"
+    if name.endswith(":latest") and name[: -len(":latest")] in have:
+        return name[: -len(":latest")]
+    return None
+
+
 def ollama_unload(model):
     """Free a model's VRAM. Returns True if the request succeeded. A model that is not installed (404) or an
     unreachable server is not an error here: there is nothing to unload."""
@@ -926,45 +1014,35 @@ def ollama_unload(model):
         return False
 
 
-def ollama_installed():
-    """Models this Ollama has pulled, or [] if it cannot be reached."""
-    import urllib.request
-    try:
-        tags = json.loads(urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=60).read())
-        return [m["name"] for m in tags.get("models", [])]
-    except Exception:
-        return []
-
-
 def ollama_loaded():
-    import urllib.request
-    try:
-        return [m["name"] for m in json.loads(urllib.request.urlopen("http://127.0.0.1:11434/api/ps", timeout=60).read()).get("models", [])]
-    except Exception:
-        return []
+    """Currently resident models. [] on versions where /api/ps is absent or returns nothing (0.34.2 returns
+    an empty list even with a model loaded), so never treat [] as proof that nothing is loaded."""
+    ps = _ollama_try("/api/ps", timeout=30) or {}
+    return [m.get("name") or m.get("model") for m in ps.get("models", []) or []]
 
 
-def ensure_only(model, others=None):
-    """Unload every OTHER installed model before running `model`, so the first call is not slowed by another
-    model still holding VRAM. Only models this Ollama actually has are touched: hardcoding our two defaults
-    made every run fail on a machine that has neither."""
+def ensure_only(model, others=None, warn=True):
+    """Unload other installed models before running `model`. This is an OPTIMISATION - it stops a second
+    model holding VRAM and slowing the first call - so any failure warns and continues."""
     installed = set(ollama_installed())
     candidates = set(others) if others is not None else (installed | set(MODELS_DEFAULT))
+    failed = []
     for m in sorted(candidates):
-        if m != model and m in installed:
-            ollama_unload(m)
+        if m != model and m in installed and not ollama_unload(m):
+            failed.append(m)
+    if failed and warn:
+        print(f"note: could not unload {', '.join(failed)} (continuing; the first call may be slower "
+              f"or spill to CPU if VRAM is tight)")
+    return not failed
 
 
 @lru_cache(maxsize=None)
 def model_supports_thinking(model):
-    """Ollama rejects `think` with HTTP 400 on models without the capability (e.g. qwen2.5-coder:7b)."""
-    import urllib.request
-    req = urllib.request.Request("http://127.0.0.1:11434/api/show", data=json.dumps({"model": model}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    try:
-        return "thinking" in json.loads(urllib.request.urlopen(req, timeout=120).read()).get("capabilities", [])
-    except Exception:
-        return False
+    """Ollama rejects `think` with HTTP 400 on models without the capability. Older servers take `name`
+    instead of `model`, and older ones still report no `capabilities` at all - in which case we assume no
+    thinking, which is the safe direction: the request simply omits `think`."""
+    info = _ollama_try("/api/show", {"model": model}, timeout=120) or _ollama_try("/api/show", {"name": model}, timeout=120)
+    return "thinking" in ((info or {}).get("capabilities") or [])
 
 
 def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout=1800, schema=None):
@@ -981,21 +1059,25 @@ def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout
         body["think"] = thinking
     if schema is not None:  # Ollama structured output: without it qwen copies the table's "-" into numeric fields
         body["format"] = schema
-    req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
     t0 = time.time()
-    fallback = ""
-    try:
-        r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
-    except urllib.error.HTTPError as e:
-        if e.code != 400 or schema is None:
+    fallbacks = []
+    # Drop the optional features one at a time if this server rejects them, rather than failing the run:
+    # structured output needs a recent Ollama, and `think` only exists on newer builds.
+    r = None
+    for drop in ([], ["format"], ["format", "think"]):
+        attempt = {k: v for k, v in body.items() if k not in drop}
+        try:
+            r = _ollama_call("/api/chat", attempt, timeout=timeout)
+            if drop:
+                fallbacks.append("dropped " + ", ".join(f"`{d}`" for d in drop) + " (server rejected it)")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code != 400 or drop == ["format", "think"]:
+                raise
+        except Exception:
             raise
-        body.pop("format", None)  # older Ollama versions reject structured output; answers are parsed leniently
-        fallback = "server rejected `format`; retried without structured output"
-        req = urllib.request.Request("http://127.0.0.1:11434/api/chat", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
-        r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
     wall = time.time() - t0
+    fallback = "; ".join(fallbacks)
     msg = r.get("message", {})
     expected = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
     ok, note = check_prompt_eval(expected, r.get("prompt_eval_count"))

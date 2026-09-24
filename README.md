@@ -9,14 +9,17 @@ deterministic Python baseline. Results and conclusions: [FINDINGS.md](FINDINGS.m
 - **Python 3.11+** with `pandas`, `pyarrow`, `numpy`. Optional: `matplotlib`, `nbformat`, `nbclient`,
   `ipykernel` (for `explore.ipynb`), `tokenizers` + `huggingface_hub` (exact token counts; without them
   counts fall back to characters/3.5).
-- **[Ollama](https://ollama.com)** running locally (developed against 0.34.2) with the models pulled:
+- **[Ollama](https://ollama.com)** (developed against 0.34.x; older versions work — the harness detects
+  missing endpoints and degrades). Set `OLLAMA_HOST` if it is not on `127.0.0.1:11434`. Models pulled:
   ```bash
   ollama pull qwen2.5-coder:7b     # 4.7 GB
   ollama pull gemma4:26b           # 18 GB
   ```
-- **A GPU with enough VRAM for one model at a time.** Measured here on an RTX A4500 (20 GB): qwen stays
-  fully on GPU up to 16k context (~5.4 GB), gemma needs ~19 GB. The two cannot be resident together, so runs
-  unload one model before loading the other.
+- **A GPU with enough VRAM for one model at a time**, or none — CPU works, just slower. Measured here on an
+  RTX A4500 (20 GB): qwen stays fully on GPU up to 16k context (~5.4 GB), gemma needs ~19 GB. The two cannot
+  be resident together, so runs unload one before loading the other; if unloading fails it warns and carries
+  on. Free VRAM is read from `nvidia-smi`, or `rocm-smi` on AMD (untested), and simply recorded as unknown
+  when neither is present.
 - **The RCAEval dataset** in `RCAEval-data/` (read-only, git-ignored, ~5 GB): download it from
   [huggingface.co/datasets/phamquiluan/RCAEval](https://huggingface.co/datasets/phamquiluan/RCAEval). The
   layout expected is `RCAEval-data/cases.parquet` plus one folder per case containing `metrics.parquet`,
