@@ -4,6 +4,12 @@ Reproduce the committed 12-case run:
 
     python run_sample.py --label sample12-full-pipeline
 
+First time here? Check the setup and measure your hardware before committing to
+a long run - this checks Ollama and the dataset, times one case, and prints the
+commands with estimates, without running anything else:
+
+    python run_sample.py --quickstart --models <your model>
+
 Cheap variants (no Ollama calls, seconds rather than an hour):
 
     python run_sample.py --cases re3ss_carts_f1_1 --no-llm --label smoke
@@ -14,10 +20,14 @@ fit on a 20 GB card together). Records are written incrementally, so a crash
 keeps everything produced up to that point.
 """
 import argparse
+import json
 import time
+import urllib.request
+from pathlib import Path
 
-from rca_lib import (CAPPED_PAT_ROWS, MODELS_DEFAULT, SAMPLE12, SAMPLE50, direct_llm, ensure_only, start_run, step1_llm,
-                     step1_python, step2_llm, step2_python, step3_llm, step3_python)
+from rca_lib import (ANSWER_RESERVE, CAPPED_PAT_ROWS, DATA_DIR, MODELS_DEFAULT, SAMPLE12, SAMPLE50,
+                     answer_reserve_for, direct_llm, ensure_only, gpu_memory_mb, model_supports_thinking,
+                     start_run, step1_llm, step1_python, step2_llm, step2_python, step3_llm, step3_python)
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
@@ -93,6 +103,87 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
     return w.dir
 
 
+def _ollama_tags():
+    return json.loads(urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=30).read())
+
+
+def quickstart(models, case="re3ss_carts_f1_1"):
+    """Check the setup, time one case, and print the commands for a real run. Runs one case only."""
+    print("== checking the setup\n")
+    ok = True
+
+    try:
+        tags = _ollama_tags()
+        have = sorted({m["name"] for m in tags.get("models", [])})
+        print(f"  Ollama      reachable, {len(have)} model(s) installed")
+    except Exception as e:
+        print(f"  Ollama      NOT reachable at http://127.0.0.1:11434 ({type(e).__name__}).")
+        print("              Start it with `ollama serve`, then run this again.")
+        return
+    missing = [m for m in models if m not in have and f"{m}:latest" not in have]
+    for m in models:
+        print(f"  model       {m}: {'installed' if m not in missing else 'NOT INSTALLED -> ollama pull ' + m}")
+    ok = ok and not missing
+
+    data = Path(DATA_DIR)
+    if (data / "cases.parquet").exists():
+        n = len(list(data.glob("re*"))) if data.exists() else 0
+        print(f"  dataset     {data} ({n} case folders)")
+    else:
+        print(f"  dataset     NOT FOUND at {data}")
+        print("              Download RCAEval from https://huggingface.co/datasets/phamquiluan/RCAEval")
+        ok = False
+
+    gpu = gpu_memory_mb()
+    print(f"  GPU         {gpu[0]} MB free of {gpu[2]} MB" if gpu else "  GPU         no nvidia-smi (CPU or non-NVIDIA; expect slower calls)")
+
+    if not ok:
+        print("\nFix the items above, then run --quickstart again.")
+        return
+
+    print()
+    for m in models:
+        thinking = model_supports_thinking(m)
+        known = m in ANSWER_RESERVE
+        print(f"  {m}: thinking capability = {thinking}"
+              + ("  (gemma-style thinking may never converge; this harness runs thinking off)" if thinking else ""))
+        print(f"  {' ' * len(m)}  answer reserve = {answer_reserve_for(m)} tokens"
+              + ("" if known else f"  (unknown model, using the default; add an entry to ANSWER_RESERVE in rca_lib.py to change it)"))
+
+    print(f"\n== timing one case ({case}), cold then warm\n")
+    timings = {}
+    for m in models:
+        ensure_only(m)
+        t0 = time.time()
+        r = direct_llm(case, model=m, thinking=False)   # cold: includes loading the model
+        cold = time.time() - t0
+        t0 = time.time()
+        r = direct_llm(case, model=m, thinking=False)   # warm: what a run actually pays per call
+        warm = time.time() - t0
+        a = r["meta"]["attempts"][-1]
+        timings[m] = warm
+        print(f"  {m}: {cold:.1f}s cold (includes load), {warm:.1f}s warm  "
+              f"(prompt {r['meta']['prompt_tokens']} tokens, num_ctx {a['num_ctx']}, answer {r['meta']['answer']})")
+
+    per_call = sum(timings.values())
+    print("\n== rough estimates, from the WARM time on this one case\n")
+    est = lambda calls_per_case, cases: (per_call * calls_per_case * cases) / 60
+    print(f"  12 cases, direct plain           ~{est(1, 12):.0f} min")
+    print(f"  50 cases, direct plain           ~{est(1, 50):.0f} min")
+    print(f"  50 cases, 3 direct variants      ~{est(3, 50):.0f} min")
+    print(f"  12 cases, full staged pipeline   ~{est(7, 12):.0f} min   (7 model calls per case per model)")
+    print("  TrainTicket cases add ~40 s each of one-off trace parsing, and each model swap costs one load.")
+    print("  Prompt sizes vary by case (~700 to ~12k tokens), so a real run will differ from this estimate.")
+
+    ms = " ".join(models)
+    print("\n== commands\n")
+    print(f"  python run_sample.py --models {ms} --direct plain --direct-only --label direct12")
+    print(f"  python run_sample.py --models {ms} --preset50 --direct plain capped roles --direct-only --label direct50")
+    print(f"  python run_sample.py --models {ms} --label full-pipeline")
+    print(f"  python run_sample.py --no-llm --label python-only            # baseline, no model calls")
+    print("\nNothing else has been run. Pick a command above when you are ready.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cases", nargs="*", help="case ids (default: the --preset sample)")
@@ -105,7 +196,12 @@ def main():
                     help="direct variants: plain, capped (~3k tokens), roles (+ step-2 role labels), facts (+ raw call graph)")
     ap.add_argument("--direct-only", action="store_true", help="skip the staged step-1/2/3 LLM arms")
     ap.add_argument("--preset50", action="store_true", help="use the 50-case stratified sample")
+    ap.add_argument("--quickstart", action="store_true",
+                    help="check the setup, time one case, print run commands and estimates, then stop")
     a = ap.parse_args()
+    if a.quickstart:
+        quickstart(a.models, case=(a.cases or ["re3ss_carts_f1_1"])[0])
+        return
     cases = a.cases or (SAMPLE50 if a.preset50 else [c for c, _ in SAMPLE12])
     direct = a.direct or (["plain"] if a.direct_only else [])
     run(cases, a.models, a.label, notes=a.notes, use_llm=not a.no_llm,

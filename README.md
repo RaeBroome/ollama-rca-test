@@ -24,6 +24,15 @@ deterministic Python baseline. Results and conclusions: [FINDINGS.md](FINDINGS.m
 
 ## Running
 
+Start here — it checks Ollama and the dataset, detects the model's thinking capability, times one case cold
+and warm, prints estimates for the real runs, and stops without running anything else:
+
+```bash
+python run_sample.py --quickstart --models <your model>
+```
+
+Then:
+
 ```bash
 python run_sample.py --no-llm --label python-only            # Python arms only, no model calls
 python run_sample.py --preset50 --direct plain capped roles --direct-only --label direct-variants
@@ -65,10 +74,14 @@ python -c "from rca_lib import read_case; r = read_case('results/<run>', 're3ss_
 ## Using a different model
 
 1. `ollama pull <model>`, then either pass `--models <model>` or edit `MODELS_DEFAULT` in `rca_lib.py`.
-2. **Answer budget**: add an entry to `ANSWER_RESERVE` in `rca_lib.py`. `num_ctx_for(prompt_tokens, model,
-   thinking)` sizes the context per case as prompt + reserve + 15% rather than a flat value, because a flat
-   16k wastes VRAM on small cases and truncates large ones. Ollama truncates over-long prompts **silently**,
-   so every call checks `prompt_eval_count` with `check_prompt_eval`.
+   Run `python run_sample.py --quickstart --models <model>` first: it verifies the model is installed,
+   reports its thinking capability and answer reserve, and times a call on your hardware.
+2. **Answer budget (optional)**: an unknown model falls back to the default reserve (1024 tokens, plus 4096
+   if thinking is on), so nothing needs changing to get started. Add an entry to `ANSWER_RESERVE` in
+   `rca_lib.py` only if a model needs a different budget. `num_ctx_for(prompt_tokens, model, thinking)` sizes
+   the context per case as prompt + reserve + 15% rather than a flat value, because a flat 16k wastes VRAM on
+   small cases and truncates large ones. Ollama truncates over-long prompts **silently**, so every call checks
+   `prompt_eval_count` with `check_prompt_eval`.
 3. **Thinking mode**: detected per model via `/api/show`; Ollama returns HTTP 400 if you pass `think` to a
    model without the capability. For a thinking model, budget for reasoning tokens that never reach
    `message.content` — `THINKING_EXTRA` adds 4096. Read answers from `message.content` only.
@@ -77,6 +90,12 @@ python -c "from rca_lib import read_case; r = read_case('results/<run>', 're3ss_
    `num_predict` 20000 it produced 52k characters of reasoning and no answer, after the same at 5k, 6k and
    12k tokens. It is run with thinking off. If a new model returns empty answers, check `done_reason` — if it
    is `length` with a large `thinking` field, that is this failure mode, not a parse error.
+
+4. **Runtime**: the 50-case run here took **2h13m** for two models — qwen 7B and gemma 26B — on a dedicated
+   20 GB GPU. A much larger model, or one running on unified memory (say a 120B on a Framework Desktop at
+   ~256 GB/s), will be substantially slower per call, and the cost scales with the number of calls: the
+   50-case three-variant run is 300 calls. Use `--quickstart` to measure your own per-call time before
+   committing to a full run.
 
 ## Attribution
 
