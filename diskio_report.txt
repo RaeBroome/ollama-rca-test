@@ -1,0 +1,87 @@
+  [ 1/50] re1ob_adservice_cpu_1            flagged= 0 truth_flagged=False top1 adservice -> adservice  13s
+  [ 2/50] re1ob_adservice_delay_1          flagged= 0 truth_flagged=False top1 adservice -> adservice  15s
+  [ 3/50] re1ob_adservice_disk_1           flagged= 0 truth_flagged=False top1 adservice -> adservice  16s
+  [ 4/50] re1ob_adservice_loss_1           flagged= 0 truth_flagged=False top1 checkoutservice -> checkoutservice  17s
+  [ 5/50] re1ob_adservice_mem_1            flagged= 0 truth_flagged=False top1 adservice -> adservice  19s
+  [ 6/50] re1ob_cartservice_loss_4         flagged= 0 truth_flagged=False top1 recommendationservice -> recommendationservice  20s
+  [ 7/50] re1ss_carts_cpu_1                flagged= 0 truth_flagged=False top1 carts -> carts  21s
+  [ 8/50] re1ss_carts_cpu_2                flagged= 0 truth_flagged=False top1 carts -> carts  22s
+  [ 9/50] re1ss_carts_delay_1              flagged= 0 truth_flagged=False top1 carts -> carts  24s
+  [10/50] re1ss_carts_disk_1               flagged= 0 truth_flagged=False top1 carts -> carts  25s
+  [11/50] re1ss_carts_loss_1               flagged= 0 truth_flagged=False top1 orders -> orders  26s
+  [12/50] re1ss_carts_mem_1                flagged= 0 truth_flagged=False top1 carts -> carts  27s
+  [13/50] re1tt_ts-auth-service_cpu_1      flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  52s
+  [14/50] re1tt_ts-auth-service_delay_1    flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  57s
+  [15/50] re1tt_ts-auth-service_disk_1     flagged= 0 truth_flagged=False top1 ts-admin-user-service -> ts-admin-user-service  62s
+  [16/50] re1tt_ts-auth-service_loss_1     flagged= 0 truth_flagged=False top1 ts-preserve-other-service -> ts-preserve-other-service  66s
+  [17/50] re1tt_ts-auth-service_mem_1      flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  71s
+  [18/50] re1tt_ts-order-service_cpu_1     flagged= 0 truth_flagged=False top1 ts-order-service -> ts-order-service  76s
+  [19/50] re2ob_checkoutservice_cpu_1      flagged= 0 truth_flagged=False top1 checkoutservice -> checkoutservice  92s
+  [20/50] re2ob_checkoutservice_delay_1    flagged= 0 truth_flagged=False top1 emailservice -> emailservice  110s
+  [21/50] re2ob_checkoutservice_disk_1     flagged= 1 truth_flagged=True  top1 checkoutservice -> checkoutservice  126s
+  [22/50] re2ob_checkoutservice_disk_2     flagged= 2 truth_flagged=True  top1 checkoutservice -> checkoutservice  144s
+  [23/50] re2ob_checkoutservice_loss_1     flagged= 0 truth_flagged=False top1 checkoutservice -> checkoutservice  160s
+  [24/50] re2ob_checkoutservice_mem_1      flagged= 0 truth_flagged=False top1 checkoutservice -> checkoutservice  177s
+  [25/50] re2ss_carts_cpu_1                flagged= 0 truth_flagged=False top1 carts -> carts  204s
+  [26/50] re2ss_carts_delay_1              flagged= 0 truth_flagged=False top1 carts -> carts  229s
+  [27/50] re2ss_carts_disk_1               flagged= 0 truth_flagged=False top1 carts -> carts  256s
+  [28/50] re2ss_carts_loss_1               flagged= 0 truth_flagged=False top1 carts -> carts  283s
+  [29/50] re2ss_carts_mem_1                flagged= 0 truth_flagged=False top1 carts -> carts  309s
+  [30/50] re2ss_user_loss_1                flagged= 0 truth_flagged=False top1 user -> user  326s
+  [31/50] re2tt_ts-auth-service_cpu_1      flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  335s
+  [32/50] re2tt_ts-auth-service_delay_1    flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  486s
+  [33/50] re2tt_ts-auth-service_disk_1     flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  698s
+  [34/50] re2tt_ts-auth-service_loss_1     flagged= 0 truth_flagged=False top1 ts-order-other-service -> ts-order-other-service  1056s
+  [35/50] re2tt_ts-auth-service_mem_1      flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  1479s
+  [36/50] re2tt_ts-order-service_delay_1   flagged= 0 truth_flagged=False top1 ts-security-service -> ts-security-service  1566s
+  [37/50] re3ob_adservice_f3_1             flagged= 0 truth_flagged=False top1 frontend -> frontend  1574s
+  [38/50] re3ob_adservice_f4_1             flagged= 0 truth_flagged=False top1 adservice -> adservice  1585s
+  [39/50] re3ob_cartservice_f1_1           flagged= 0 truth_flagged=False top1 frontend -> frontend  1593s
+  [40/50] re3ob_emailservice_f2_1          flagged= 0 truth_flagged=False top1 emailservice -> emailservice  1601s
+  [41/50] re3ss_carts_f1_1                 flagged= 1 truth_flagged=False top1 carts -> carts  1629s
+  [42/50] re3ss_carts_f3_1                 flagged= 0 truth_flagged=False top1 carts -> carts  1657s
+  [43/50] re3ss_carts_f4_1                 flagged= 0 truth_flagged=False top1 carts -> carts  1685s
+  [44/50] re3ss_front-end_f1_1             flagged= 0 truth_flagged=False top1 front-end -> front-end  1713s
+  [45/50] re3ss_orders_f1_1                flagged= 2 truth_flagged=True  top1 front-end -> front-end  1755s
+  [46/50] re3ss_orders_f3_1                flagged= 0 truth_flagged=False top1 front-end -> front-end  1780s
+  [47/50] re3tt_ts-auth-service_f1_1       flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  1809s
+  [48/50] re3tt_ts-auth-service_f2_1       flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  1841s
+  [49/50] re3tt_ts-auth-service_f3_1       flagged= 0 truth_flagged=False top1 ts-admin-travel-service -> ts-admin-travel-service  1889s
+  [50/50] re3tt_ts-auth-service_f4_1       flagged= 0 truth_flagged=False top1 ts-auth-service -> ts-auth-service  1921s
+
+====================================================================================================
+PART 1  Python arms: exact counterfactual (same cases, artifact evidence dropped before ranking)
+
+  CLEAR cases (43)
+    py3_top1  with 34/43 ( 79.1%)   without 34/43 ( 79.1%)   delta +0   abstentions 0 -> 0
+    py3_role  with 24/43 ( 55.8%)   without 24/43 ( 55.8%)   delta +0   abstentions 0 -> 0
+
+  WEAK cases (7)
+    py3_top1  with  3/7 ( 42.9%)   without  3/7 ( 42.9%)   delta +0   abstentions 0 -> 0
+    py3_role  with  3/7 ( 42.9%)   without  3/7 ( 42.9%)   delta +0   abstentions 0 -> 0
+
+====================================================================================================
+PART 2  how far the artifact reaches
+  cases with any diskio_appears service: 4/50
+  cases where the TRUE root cause is flagged: 3/50
+  of those, truth still has clear non-artifact evidence: 3/3
+
+  cases where the truth is flagged AND has no other clear evidence (the artifact is doing the work):
+    none
+
+====================================================================================================
+PART 3  LLM arms: conditional split (NOT a counterfactual - see the module docstring)
+  claude-opus                      truth flagged:  3/3 (100.0%)   not flagged: 39/40 ( 97.5%)
+  direct:qwen2.5-coder:7b          truth flagged:  1/3 ( 33.3%)   not flagged: 28/40 ( 70.0%)
+  direct:gemma4:26b                truth flagged:  1/3 ( 33.3%)   not flagged: 27/40 ( 67.5%)
+  direct-capped:qwen2.5-coder:7b   truth flagged:  1/3 ( 33.3%)   not flagged: 27/40 ( 67.5%)
+  direct-capped:gemma4:26b         truth flagged:  2/3 ( 66.7%)   not flagged: 29/40 ( 72.5%)
+
+  arms whose stated reason cites a disk signal (text search on reason_for_answer):
+    claude-opus                       5/50 answers mention disk
+    direct:qwen2.5-coder:7b           1/50 answers mention disk
+    direct:gemma4:26b                 2/50 answers mention disk
+    direct-capped:qwen2.5-coder:7b    4/50 answers mention disk
+    direct-capped:gemma4:26b          4/50 answers mention disk
+
+per-case table written to diskio_comparison.csv  (1921s)
