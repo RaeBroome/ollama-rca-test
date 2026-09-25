@@ -25,12 +25,12 @@ from pathlib import Path
 
 from rca_lib import (ANSWER_RESERVE, CAPPED_PAT_ROWS, DATA_DIR, MODELS_DEFAULT, SAMPLE12, SAMPLE50,
                      answer_reserve_for, direct_llm, ensure_only, gpu_memory_mb, model_supports_thinking,
-                     ollama_models, ollama_url, ollama_version, resolve_model, start_run, step1_llm,
-                     step1_python, step2_llm, step2_python, step3_llm, step3_python)
+                     ollama_models, ollama_unload, ollama_url, ollama_version, resolve_model, start_run,
+                     step1_llm, step1_python, step2_llm, step2_python, step3_llm, step3_python)
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
-        step3_rules=("top1", "role"), staged=True, direct=()):
+        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False):
     w = start_run(label, notes=notes or f"{len(cases)} cases, models={models if use_llm else 'none'}")
     print("run dir:", w.dir, flush=True)
     t0 = time.time()
@@ -95,8 +95,14 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
             r3 = step3_python(case, r2, rule=rule)
             w.add(case, "step3", r3["meta"]["source"], r3)
 
+    if use_llm and not keep_warm:
+        # Free the VRAM instead of leaving the last model resident until Ollama times it out. --keep-warm
+        # skips this when the next run follows immediately (a reload costs ~18 s for a 26B model).
+        for model in models:
+            if ollama_unload(model):
+                print(f"unloaded {model}", flush=True)
     summary = w.finalize(extra_meta={"cases": list(cases), "models": models if use_llm else [],
-                                     "use_llm": use_llm, "command": "run_sample.py"})
+                                     "use_llm": use_llm, "command": "run_sample.py", "keep_warm": keep_warm})
     print(f"\nrecords: {w.n} | summary rows: {len(summary)} | {time.time() - t0:.0f}s")
     print(w.dir)
     return w.dir
@@ -224,6 +230,8 @@ def main():
                     help="direct variants: plain, capped (~3k tokens), roles (+ step-2 role labels), facts (+ raw call graph)")
     ap.add_argument("--direct-only", action="store_true", help="skip the staged step-1/2/3 LLM arms")
     ap.add_argument("--preset50", action="store_true", help="use the 50-case stratified sample")
+    ap.add_argument("--keep-warm", action="store_true",
+                    help="leave the model loaded at the end (default: unload, freeing VRAM)")
     ap.add_argument("--quickstart", action="store_true",
                     help="check the setup, time one case, print run commands and estimates, then stop")
     a = ap.parse_args()
@@ -234,7 +242,7 @@ def main():
     cases = a.cases or (SAMPLE50 if a.preset50 else [c for c, _ in SAMPLE12])
     direct = a.direct or (["plain"] if a.direct_only else [])
     run(cases, models, a.label, notes=a.notes, use_llm=not a.no_llm,
-        staged=not a.direct_only, direct=direct)
+        staged=not a.direct_only, direct=direct, keep_warm=a.keep_warm)
 
 
 if __name__ == "__main__":

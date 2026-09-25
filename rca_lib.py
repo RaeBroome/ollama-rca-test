@@ -744,6 +744,12 @@ def answer_reserve_for(model=None, thinking=False):
     return ANSWER_RESERVE.get(model, ANSWER_RESERVE["default"]) + (THINKING_EXTRA if thinking else 0)
 
 
+# KNOWN COST, deliberately not optimised: Ollama rebuilds the runner whenever num_ctx changes, which costs a
+# full model reload - measured at ~18 s for gemma4:26b and ~6 s for qwen2.5-coder:7b, against 0.2 s for the
+# same call at an unchanged num_ctx. Sizing the context per case means most calls pay it, and that reload is
+# most of a long run's wall time. Coarse buckets (4096) were tried and reverted: they saved ~26% but changed
+# one answer out of 24 (qwen, re3ss_carts_f4_1), and a runtime setting that alters outputs is not worth the
+# time saved. Keep the rounding fine; treat the reload as the price of per-case sizing.
 def num_ctx_for(prompt_tokens, model=None, thinking=False, answer_reserve=None, margin=0.15, round_to=512):
     """Per-case Ollama num_ctx: prompt + answer reserve + margin, rounded up, rather than a flat value.
     prompt_tokens must be the FULL prompt (instructions + evidence), not just the evidence.
@@ -942,6 +948,9 @@ EVIDENCE:
 """
 
 
+KEEP_ALIVE = "5m"  # how long Ollama holds a model after a call; runs unload at the end unless --keep-warm
+
+
 def ollama_url(path=""):
     """Base URL from OLLAMA_HOST (same variable the ollama CLI uses), accepting `host:port` or a full URL.
     Not everyone runs Ollama on localhost:11434."""
@@ -1022,15 +1031,25 @@ def ollama_loaded():
 
 
 def ensure_only(model, others=None, warn=True):
-    """Unload other installed models before running `model`. This is an OPTIMISATION - it stops a second
-    model holding VRAM and slowing the first call - so any failure warns and continues."""
+    """Unload other RESIDENT models before running `model`. This is an OPTIMISATION - it stops a second model
+    holding VRAM and slowing the first call - so any failure warns and continues.
+
+    Eviction is server-wide: on a shared Ollama this takes the model away from anyone else using it, so each
+    eviction is announced rather than done silently."""
     installed = set(ollama_installed())
+    loaded = set(ollama_loaded())
     candidates = set(others) if others is not None else (installed | set(MODELS_DEFAULT))
-    failed = []
+    evicted, failed = [], []
     for m in sorted(candidates):
-        if m != model and m in installed and not ollama_unload(m):
-            failed.append(m)
-    if failed and warn:
+        if m == model or m not in installed:
+            continue
+        if loaded and m not in loaded:
+            continue  # not resident (when the server tells us); nothing to evict
+        (evicted if ollama_unload(m) else failed).append(m)
+    if warn and evicted:
+        print(f"note: unloaded {', '.join(evicted)} to free VRAM for {model}. On a shared Ollama this "
+              f"evicts it for other users too.")
+    if warn and failed:
         print(f"note: could not unload {', '.join(failed)} (continuing; the first call may be slower "
               f"or spill to CPU if VRAM is tight)")
     return not failed
@@ -1045,7 +1064,8 @@ def model_supports_thinking(model):
     return "thinking" in ((info or {}).get("capabilities") or [])
 
 
-def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout=1800, schema=None):
+def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout=1800, schema=None,
+                keep_alive=None):
     """One chat call at temperature 0. Records free GPU memory before the call (see gpu_memory_mb) and checks
     prompt_eval_count for silent truncation. Answers come from message.content only, never thinking.
     `thinking` is ignored (and recorded as unsupported) for models without the thinking capability."""
@@ -1054,7 +1074,8 @@ def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout
     gpu_before = gpu_memory_mb()
     supported = model_supports_thinking(model)
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False,
-            "keep_alive": "5m", "options": {"num_ctx": num_ctx, "temperature": 0, "num_predict": num_predict}}
+            "keep_alive": KEEP_ALIVE if keep_alive is None else keep_alive,
+            "options": {"num_ctx": num_ctx, "temperature": 0, "num_predict": num_predict}}
     if supported:
         body["think"] = thinking
     if schema is not None:  # Ollama structured output: without it qwen copies the table's "-" into numeric fields

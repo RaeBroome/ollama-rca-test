@@ -100,10 +100,17 @@ python -c "from rca_lib import read_case; r = read_case('results/<run>', 're3ss_
    is `length` with a large `thinking` field, that is this failure mode, not a parse error.
 
 4. **Runtime**: the 50-case run here took **2h13m** for two models — qwen 7B and gemma 26B — on a dedicated
-   20 GB GPU. A much larger model, or one running on unified memory (say a 120B on a Framework Desktop at
-   ~256 GB/s), will be substantially slower per call, and the cost scales with the number of calls: the
-   50-case three-variant run is 300 calls. Use `--quickstart` to measure your own per-call time before
-   committing to a full run.
+   20 GB GPU, but most of that was **model reloads, not inference**. Ollama rebuilds the runner whenever
+   `num_ctx` changes (~18 s for a 26B model, against 0.2 s for the same call at an unchanged `num_ctx`), and
+   context is sized per case, so most calls pay it. Expect the same on your hardware; coarse context buckets
+   were tried and reverted because they changed an answer. A much larger model, or one on unified memory
+   (say a 120B on a Framework Desktop at ~256 GB/s), will be slower again per call, and the cost scales with
+   call count: the 50-case three-variant run is 300 calls. Use `--quickstart` to measure before committing.
+
+5. **Models are unloaded when a run finishes**, freeing VRAM; pass `--keep-warm` to leave the last one
+   resident if another run follows immediately. `rca_lib.KEEP_ALIVE` (default `"5m"`) sets how long Ollama
+   holds a model between calls. Before each model's phase, other resident models are evicted to free VRAM —
+   announced in the output, because on a shared Ollama that evicts them for other users too.
 
 ## Attribution
 

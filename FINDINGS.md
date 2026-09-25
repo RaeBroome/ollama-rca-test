@@ -81,11 +81,30 @@ abstentions did happen, they were not selective: in the staged run, 14 abstentio
 baseline would have been wrong only 6 times, against a 48% base rate of it being wrong. The instruction is
 present in the prompt and these models do not act on it.
 
-## Capped evidence is free or better
+## Capped evidence costs no accuracy
 
 Cutting the evidence to ~10 log-pattern rows (~2k tokens) *raised* gemma's accuracy by 7 points and cost qwen
-2, while running 3–6× faster. The cheaper configuration is also the one that fits TrainTicket cases, whose
-full evidence reaches ~12k tokens.
+2. It is also the only configuration that fits TrainTicket cases, whose full evidence reaches ~12k tokens.
+
+The capped arm also *looked* 3–6× faster, and that part was an artefact. Ollama rebuilds the runner whenever
+`num_ctx` changes — a full model reload, ~18 s for gemma4:26b against 0.2 s for the same call at an unchanged
+`num_ctx`. Capped prompts are similar in size, so they round to the same context value about twice as often
+(54% vs 26% reuse) and skip the reload. Measured over the 50-case run: gemma calls where `num_ctx` changed
+took a median of 25.7 s, and 3.0 s where it did not. **Compression buys accuracy parity and fit, not speed.**
+
+## Two things to know before reproducing these numbers
+
+**Temperature 0 is not determinism.** Changing only `num_ctx` — same prompt, same model, same seed-free
+settings — flipped one answer of 24: qwen on `re3ss_carts_f4_1` moved from `orders` to `orders-db` (both
+wrong; the truth is `carts`). 23 of 24 were identical. It happened on a weak-evidence case where the model
+had no strong preference, which is where such flips should be expected. Runtime configuration is part of the
+input, so an exact replication needs the same context sizing, not just temperature 0.
+
+**Most of the wall time is model reloads, not inference.** Because context is sized per case, most calls
+change `num_ctx` and pay the rebuild. The 50-case run's 2h13m is therefore mostly reloading: for gemma,
+93 of 150 calls changed `num_ctx` at a median 25.7 s each, against 3.0 s for the 57 that did not. Coarse
+context buckets were tried and reverted — they saved ~26% but changed that one answer, and a runtime setting
+that alters output is not worth the time.
 
 ## Known limitations
 
