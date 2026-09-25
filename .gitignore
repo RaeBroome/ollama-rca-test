@@ -1,3 +1,6 @@
 RCAEval-data/
 __pycache__/
 .claude/settings.local.json
+
+*-logs.csv
+*-metrics.csv
