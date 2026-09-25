@@ -35,7 +35,7 @@ ordinary code do first?**
 A naive attempt fails immediately and instructively. Dump raw telemetry into a prompt and the model answers
 with whichever service is *loudest*. In Sock Shop, `front-end` emits ~1,900 log lines a minute against
 `carts`' ~180 — and `front-end` is almost always a victim, not a cause. One Sock Shop case is 84,665 log
-lines plus a 1,441 × 81 metric table. Nothing useful happens until that is reduced.
+lines plus 1,441 rows of 80 metrics. Nothing useful happens until that is reduced.
 
 So the work was: reduce the evidence with code, hand the model progressively more of the reduction, and
 measure where the model stops helping.
@@ -72,11 +72,11 @@ separately. Every arm may answer `"none"`; abstentions are counted apart from wr
 |---|---|---|---|
 | **claude-opus-5** — plain evidence | **98%** (42/43) | 0% | 7.5 s |
 | **Python baseline** — rank by significance, take the top | **79%** (34/43) | — | — |
-| gemma4:26b — capped evidence | 72% | 7% | 3.8 s |
+| gemma4:26b — capped evidence | 72% | 7% | 4.9 s |
 | qwen2.5-coder:7b — plain evidence | 67% (29/43) | 0% | 7.9 s |
 | gemma4:26b — plain evidence | 65% (28/43) | 5% | 23.3 s |
-| qwen2.5-coder:7b — capped evidence | 65% | 0% | 3.4 s |
-| gemma / qwen — evidence + our role labels | 51% / 51% | 12% / 2% | 23.2 / 7.8 s |
+| qwen2.5-coder:7b — capped evidence | 65% | 0% | 3.5 s |
+| gemma / qwen — evidence + our role labels | 51% / 51% | 12% / 2% | 23.3 / 7.8 s |
 | either model — a ranked candidate list from Python (10 clear cases only) | 20–40% | — | — |
 
 **Weak-evidence cases (7 in the same sample).** Small enough that one case is 14 points:
@@ -111,8 +111,8 @@ arm named.
 **1. The compression is sufficient on the clear cases.** This is what the ceiling arm buys. Every earlier
 result was consistent with two very different stories: either step 0 throws away what a diagnosis needs, or a
 7B–26B model cannot use what it keeps. A frontier model reading the *identical* text — prompt sizes matched
-the local arm on all 50 cases — gets 42 of 43 clear cases. There, the reduction from 84,665 log lines to 43
-preserves the answer, and effort spent on better compression has little left to win while effort spent on the
+the local arm on all 50 cases — gets 42 of 43 clear cases. There, the reduction from 84,665 log lines to the
+56 evidence lines that case renders preserves the answer, and effort spent on better compression has little left to win while effort spent on the
 model has ~30 points available.
 
 The claim stops at the clear cases, and deliberately. A case counts as "clear" precisely when step 0 gave the
@@ -141,13 +141,20 @@ the gradient above them is measured on all 43.
 Facts are ignored; conclusions are harmful. Handing the model our ranking was the single worst thing we did
 to it — it anchors on our answer and stops reading. This inverts the intuition that a small model needs more
 help: it needs *less*, better arranged. (Measured directly: re-ranking step 1's output by step 2's reasoning
-was better in 16 of 120 runs, unchanged in 53, worse in 51. Step 2 is label-only for that reason.)
+helps rarely and hurts often, which is why step 2 is label-only. Recomputed from the records by
+`interrogate_run.py`, on the 120 case/arm rankings of the first run: **3 better, 103 unchanged, 14 worse** if
+you count the top answer changing, or **5 better, 84 unchanged, 31 worse** if you count the true cause moving
+up or down the list at all. An earlier version of this line said "16 better, 53 unchanged, 51 worse" — that
+does not reproduce under either definition, and the computation behind it was not kept. The direction is
+robust to the choice; the exact counts in that earlier figure should not be quoted.)
 
 **3. No model abstains, at any size.** Every arm can answer `"none"`, and the instruction to do so is in the
 prompt. Across **42 weak-evidence decisions** by the local models: **zero abstentions**. qwen abstained once
 in 129 clear-case calls. claude-opus-5: zero in 50 calls, including all 7 weak cases. When abstentions did
-appear in the staged pipeline they were not selective — 14 of them landed on cases where the baseline would
-have been wrong only 6 times, against a 48% base rate of being wrong. Confidence carries a little
+appear in the staged pipeline they were not selective — of 14 abstentions, the baseline would have been
+wrong on 7, against a 33% base rate of being wrong in that run, so an abstention was barely more informative
+than a coin toss. (Recomputed; this line previously said 6 of 14 against a 48% base rate. The 14 reproduces,
+the other two figures did not.) Confidence carries a little
 information where abstention carries none (Claude: 28 of 29 `high` answers correct, 18 of 21 `medium`).
 
 ## What this means practically
@@ -195,9 +202,10 @@ any model as a hypothesis, never a verdict.
 
 **One practical caution for anyone reproducing this.** Most of the wall-clock time is not inference. Ollama
 rebuilds its runner whenever the context size changes — ~18 s for a 26B model against 0.2 s for the same call
-at an unchanged size — and since context is sized per case, most calls pay it. The 50-case two-model run took
-2h13m, mostly reloading. Coarse context buckets were tried and reverted: they saved ~26% and changed an
-answer.
+at an unchanged size (a one-off measurement, see below) — and since context is sized per case, most calls pay
+it. The 50-case two-model run took 2h13m, mostly reloading; that part is in the run's `metadata.json` (8,008 s)
+and the per-call breakdown recomputes from the records. Coarse context buckets were tried and reverted: they
+saved ~26% and changed an answer — also a one-off, since the bucketing code was removed.
 
 ## Limitations, and what was not tested
 
@@ -250,6 +258,18 @@ answer.
 - **Sock Shop has no traces**, so its dependency graph is inferred from services naming each other in logs.
 - **Excluded cases**: two with broken injection timestamps, one whose label evidence duplicates another
   case's, and cases where no metric, log or trace shows any shift (listed in `explore.ipynb` section 7).
+- **Six figures here are one-off observations, not reproducible measurements.** Everything else can be
+  recomputed from the committed run records by `analyse_run.py`, `compare_claude_arm.py`, `analyse_diskio.py`,
+  `scan_diskio.py` or `interrogate_run.py`. These six cannot, because the code or configuration that produced
+  them no longer exists, and they should be read as "this was observed once" rather than as measurements:
+  the **1,456 false log edges** (the extractor that produced them was replaced); the **~26% saving from
+  context buckets and the answer it flipped** (`orders` -> `orders-db`; the bucketing code was reverted and
+  that run was not written to `results/`); gemma's **52k characters of thinking with no answer** (terminal
+  output of a blocked run); the **~18 s reload against 0.2 s** at unchanged context (hand timing); the GPU
+  footprints **~5.4 GB / ~19 GB** and **~94 tok/s** (`nvidia-smi` readings taken by hand); and the **+15%
+  detection limit** for a slow drift over 360 s (synthetic tests in a notebook whose outputs are cleared).
+  A seventh, `{svc}_diskio` identifying the root cause in "17 of 18 cases", was in this category until it was
+  re-measured — the denominator turned out to be wrong, which is why the rest are now labelled.
 
 ---
 
@@ -295,8 +315,10 @@ Cutting the evidence to ~10 log-pattern rows (~2k tokens) *raised* gemma's accur
 2. It is also the only configuration that fits TrainTicket cases, whose full evidence reaches ~25k tokens.
 
 The capped arm also *looked* 3–6× faster, and that part was an artefact of the runner rebuild described
-above: similar prompt sizes round to the same context value about twice as often (54% vs 26% reuse) and skip
-the reload. gemma calls where the context changed took a median of 25.7 s, against 3.0 s where it did not.
+above: similar prompt sizes round to the same context value more often, so more calls skip the reload —
+recomputed, gemma's capped arm reuses its context on 50% of calls against 30% for the plain arm and 26% for
+the roles arm. (An earlier version said 54% vs 26%; the slice that produced those exact numbers was not
+recorded.) gemma calls where the context changed took a median of 25.7 s, against 3.0 s where it did not.
 Compression buys accuracy parity and fit, not speed.
 
 ## Where tracing breaks down
