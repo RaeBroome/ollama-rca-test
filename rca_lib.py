@@ -762,8 +762,8 @@ def num_ctx_for(prompt_tokens, model=None, thinking=False, answer_reserve=None, 
 def gpu_memory_mb():
     """(free, used, total) MiB, or None when no supported GPU tool is present (CPU-only, Apple silicon, or a
     vendor we do not read). Sample this right before every timed model run and record it with the result:
-    /api/ps gives no GPU/CPU split on some Ollama versions, so a spill is only visible afterwards from free
-    memory plus throughput. Missing tools are normal, not an error."""
+    /api/ps cannot be trusted for the GPU/CPU split (see ollama_loaded), so a spill is only visible afterwards
+    from free memory plus throughput. Missing tools are normal, not an error."""
     return (_gpu_nvidia() or _gpu_amd())
 
 
@@ -1024,8 +1024,12 @@ def ollama_unload(model):
 
 
 def ollama_loaded():
-    """Currently resident models. [] on versions where /api/ps is absent or returns nothing (0.34.2 returns
-    an empty list even with a model loaded), so never treat [] as proof that nothing is loaded."""
+    """Which models are resident. [] where /api/ps is absent or returns nothing (0.34.2 returned an empty
+    list even with a model loaded), so never treat [] as proof that nothing is loaded.
+
+    Its SIZE and CPU/GPU split are NOT reliable: on 0.34.3 it reported 1.3 GB and 24%/76% CPU/GPU for a model
+    nvidia-smi showed holding 18.7 GB and generating at full GPU speed. Names only; read memory from
+    gpu_memory_mb()."""
     ps = _ollama_try("/api/ps", timeout=30) or {}
     return [m.get("name") or m.get("model") for m in ps.get("models", []) or []]
 
