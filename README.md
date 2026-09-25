@@ -2,7 +2,10 @@
 
 Does a local Ollama model help with root cause analysis of microservice failures? This repo evaluates
 qwen2.5-coder:7b and gemma4:26b on the [RCAEval](https://github.com/phamquiluan/RCAEval) benchmark against a
-deterministic Python baseline. Results and conclusions: [FINDINGS.md](FINDINGS.md).
+deterministic Python baseline, and against claude-opus-5 as a ceiling reference. Short version: on the same
+compressed evidence Claude gets 98% of the clear cases, the Python baseline 79%, the local models 65-67% - so
+the compression is sufficient and the local model is the limit. Results and conclusions:
+[FINDINGS.md](FINDINGS.md).
 
 ## Requirements
 
