@@ -13,7 +13,7 @@ commands with estimates, without running anything else:
 Cheap variants (no Ollama calls, seconds rather than an hour):
 
     python run_sample.py --cases re3ss_carts_f1_1 --no-llm --label smoke
-    python run_sample.py --preset sample12 --no-llm --label python-only
+    python run_sample.py --no-llm --label python-only              # the default 12-case sample
 
 Model calls are batched by model (one resident at a time: the two models do not
 fit on a 20 GB card together). Records are written incrementally, so a crash
@@ -219,15 +219,14 @@ def quickstart(models, case="re3ss_carts_f1_1"):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cases", nargs="*", help="case ids (default: the --preset sample)")
-    ap.add_argument("--preset", default="sample12", choices=["sample12"], help="named case set")
+    ap.add_argument("--cases", nargs="*", help="case ids (default: the 12-case sample)")
     ap.add_argument("--models", nargs="*", default=None,
                     help="models to use; omit with --quickstart to list what is installed")
     ap.add_argument("--no-llm", action="store_true", help="Python arms only; makes no Ollama calls")
     ap.add_argument("--label", default="run", help="folder name suffix under results/")
     ap.add_argument("--notes", default="")
     ap.add_argument("--direct", nargs="*", default=[], choices=["plain", "capped", "roles", "facts"],
-                    help="direct variants: plain, capped (~3k tokens), roles (+ step-2 role labels), facts (+ raw call graph)")
+                    help="direct variants: plain, capped (~2k tokens), roles (+ step-2 role labels), facts (+ raw call graph)")
     ap.add_argument("--direct-only", action="store_true", help="skip the staged step-1/2/3 LLM arms")
     ap.add_argument("--preset50", action="store_true", help="use the 50-case stratified sample")
     ap.add_argument("--keep-warm", action="store_true",

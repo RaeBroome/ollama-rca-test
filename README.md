@@ -6,9 +6,11 @@ deterministic Python baseline. Results and conclusions: [FINDINGS.md](FINDINGS.m
 
 ## Requirements
 
-- **Python 3.11+** with `pandas`, `pyarrow`, `numpy`. Optional: `matplotlib`, `nbformat`, `nbclient`,
-  `ipykernel` (for `explore.ipynb`), `tokenizers` + `huggingface_hub` (exact token counts; without them
-  counts fall back to characters/3.5).
+- **Python 3.13** with `pandas`, `pyarrow`, `numpy`. 3.13.0 is the only version this has been run on;
+  nothing in the code needs it specifically, but the dependency versions used here do (numpy 2.5 requires
+  3.12+, pandas 3.0 requires 3.11+), so older Pythons need older pinned dependencies and are untested.
+  Optional: `matplotlib`, `nbformat`, `nbclient`, `ipykernel` (for `explore.ipynb`), `tokenizers` +
+  `huggingface_hub` (exact token counts; without them counts fall back to characters/3.5).
 - **[Ollama](https://ollama.com)** (developed against 0.34.x; older versions work — the harness detects
   missing endpoints and degrades). Set `OLLAMA_HOST` if it is not on `127.0.0.1:11434`. Models pulled:
   ```bash
@@ -44,8 +46,9 @@ python run_sample.py --cases re3ss_carts_f1_1 --no-llm --label smoke   # one cas
 ```
 
 Useful flags: `--cases <ids>`, `--preset50` (50-case stratified sample), `--models`, `--direct
-{plain,capped,roles,facts}`, `--direct-only` (skip the staged LLM arms). Model calls are batched by model,
-so a run swaps models a few times, not once per case.
+{plain,capped,roles,facts}`, `--direct-only` (skip the staged LLM arms), `--keep-warm` (leave the model
+loaded at the end), `--quickstart` (check the setup and stop). Model calls are batched by model, so a run
+swaps models a few times, not once per case.
 
 **The default 12-case preset is for checking that a model works, not for drawing conclusions.** One case is
 worth 8 points there, and both of its headline results reversed at 50 cases: qwen scored 80% on 12 (8 correct
@@ -65,9 +68,9 @@ Each run writes `results/<timestamp>-<label>/`, committed to the repo so runs ar
 | file | contents |
 |---|---|
 | `summary.csv` | one row per case per arm: answer, correct, abstained, rank of truth, stated reason, retention kept/missed, tokens, time, free GPU |
-| `step1/step2/step3/direct.parquet` | full candidate records per arm |
+| `step1/step2/step3/direct.parquet` | full candidate records per arm (`direct.parquet` holds the direct arm) |
 | `symptoms.parquet`, `retention.parquet` | the evidence behind them; retention has one row per expected signal with `kept` true/false |
-| `metadata.json` | step versions, thresholds, order seed, models, timings, and the git commit plus whether the tree was dirty |
+| `metadata.json` | step versions, thresholds, order seed, models, timings, and the git commit plus whether the tree was dirty (`sample12-step1-step2` and `sample12-full-pipeline` predate the git block) |
 
 Records are written as each result is produced (`summary.csv` plus append-only `.jsonl`, converted to parquet
 at the end), so a crash keeps what already ran.
@@ -152,4 +155,5 @@ the link above.
   straight into a prompt. Kept as the evidence behind the one-shot failure described in
   [FINDINGS.md](FINDINGS.md); `run_test.py` still scores with the substring check that inflates
   accuracy, left as-is to show the trap.
-- `CLAUDE.md` — working rules for this project.
+- `results/` — one committed folder per run, described under [Results](#results) above.
+- `CLAUDE.md` — working rules for this project. `.claude/` holds local settings, git-ignored.

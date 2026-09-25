@@ -1911,6 +1911,7 @@ def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts
 # Every run writes its own folder, so re-runs never overwrite earlier results:
 #   step1.parquet      one row per candidate per arm
 #   step2.parquet      the same plus role / path / direction_evidence / would_demote
+#   step3.parquet      one row per decision; direct.parquet the same for the direct arm
 #   symptoms.parquet   the symptom rows behind those candidates
 #   retention.parquet  ONE ROW PER EXPECTED ITEM (kept True/False), not just counts
 #   summary.csv        one row per case per arm, openable in any spreadsheet
@@ -2045,7 +2046,7 @@ class RunWriter:
 
     def finalize(self, extra_meta=None):
         """Convert the jsonl files to parquet and write metadata.json."""
-        for name in ["step1", "step2", "step3", "symptoms", "retention"]:
+        for name in ["step1", "step2", "step3", "direct", "symptoms", "retention"]:
             f = self.dir / f"{name}.jsonl"
             if f.exists():
                 pd.read_json(f, lines=True).to_parquet(self.dir / f"{name}.parquet", index=False)
@@ -2064,7 +2065,10 @@ class RunWriter:
                 "scoring_exclusions_static": {**EXCLUDE, **BROKEN_LABELS},
                 **(extra_meta or {})}
         (self.dir / "metadata.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
-        return pd.read_csv(self.dir / "summary.csv")
+        f = self.dir / "summary.csv"
+        # a run that died before its first case has no summary.csv; still write metadata rather than
+        # raising on top of the original failure
+        return pd.read_csv(f) if f.exists() else pd.DataFrame()
 
 
 def _case_facts(case, _cache={}):
@@ -2108,7 +2112,7 @@ def read_case(run_dir, case, arm=None):
     out = {}
     s = pd.read_csv(run_dir / "summary.csv")
     out["summary"] = s[(s.case == case) & (s.arm == arm if arm else True)]
-    for name in ["step1", "step2", "symptoms", "retention"]:
+    for name in ["step1", "step2", "step3", "direct", "symptoms", "retention"]:
         f = run_dir / f"{name}.parquet"
         if f.exists():
             df = pd.read_parquet(f)

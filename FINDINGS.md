@@ -19,8 +19,8 @@ Two further traps in the obvious setup:
   case-insensitive, trimmed.
 - **Keyword filtering destroys the evidence.** Across the 8 RCAEval cases that ship a labelled root-cause log
   line, an `Exception|Error` filter kept **0 of 8**. The real markers are a `WARN … PageNotFound` line and
-  HTTP 500 access-log lines. What the filter *does* keep is ~85% background noise: a queue-master socket
-  exception that occurs at the same rate before the fault.
+  HTTP 500 access-log lines. What the filter *does* keep is 81-94% background noise per case: a
+  queue-master socket exception that occurs at the same rate before the fault.
 
 ## What step 0 does
 
