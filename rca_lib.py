@@ -9,6 +9,9 @@ import csv
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
 import warnings
 from collections import Counter
@@ -1888,6 +1891,12 @@ def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts
         return {**_step3_result(case, source, None, "none", "unparseable answer", abstained=True, extra=extra),
                 "symptoms": empty}
 
+    return _direct_answer(case, source, data, extra, services)
+
+
+def _direct_answer(case, source, data, extra, services):
+    """Turn one parsed direct-arm answer into a step-3-shaped result. Shared by every direct arm - the
+    Ollama models and the Claude reference - so an answer is scored the same way whoever produced it."""
     # the signals it says it used, so retention is comparable with the staged arms
     sym_rows = [{"case": case, "source": source, "service": str(x.get("service", "")),
                  "signal": str(x.get("signal", ""))[:160], "kind": str(x.get("kind", "")), "strength": "",
@@ -1906,6 +1915,145 @@ def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts
                                 f"model named a service that is not in this system: {answer}",
                                 abstained=True, extra=extra), "symptoms": syms}
     return {**_step3_result(case, source, answer, conf, why, extra=extra), "symptoms": syms}
+
+# ============================================================ the Claude arm (a ceiling reference)
+# Runs the same step-0 evidence past Claude through the Claude Code CLI in headless mode, which
+# authenticates with this machine's own subscription login - no API key is involved.
+#
+# Blinding, each part verified before this was written:
+#   --disallowed-tools "*"   REMOVES the tool definitions rather than only denying them (the model reports
+#                            having none, and the prompt drops from ~24.5k to ~4.5k tokens), so it cannot
+#                            read RCAEval-data/ or an earlier run's summary.csv to find the answer.
+#   cwd outside the repo     keeps CLAUDE.md out of the prompt: it names the diskio artifact and which
+#                            service is loudest, both of which are hints.
+#   --system-prompt          replaces Claude Code's own system prompt, so this is not a coding agent.
+#   --strict-mcp-config      no MCP servers.
+#   one process per case     no shared context between cases, unlike answering them in a conversation.
+#
+# NOT like-for-like with the Ollama arms: the CLI exposes no temperature, top-p or seed, so this arm cannot
+# be pinned to temperature 0 the way every local arm is. CLAUDE_EFFORT is fixed and recorded instead. Treat
+# it as a ceiling reference, not a controlled comparison.
+CLAUDE_CLI_VERSION = None          # filled in on first use, recorded in metadata
+CLAUDE_EFFORT = "medium"           # the CLI has no temperature; this is the knob it does have
+CLAUDE_MODEL_DEFAULT = "opus"
+CLAUDE_SYSTEM_PROMPT = ("You are a diagnostic assistant. Follow the instructions in the message exactly "
+                        "and reply with JSON only.")
+CLAUDE_ARM_VERSION = "claude-arm-v0.1"
+
+
+def claude_sandbox():
+    """An empty directory outside the repo to run the CLI from, so no CLAUDE.md or repo file is discovered."""
+    d = Path(tempfile.gettempdir()) / "rca_claude_arm"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def claude_cli():
+    """Path to the Claude Code CLI, or None. Never raises: a missing CLI skips the arm."""
+    return shutil.which("claude")
+
+
+def claude_available():
+    """(ok, detail) - whether a headless call can be made at all. The test call also confirms the
+    subscription login: without it the CLI answers 'Not logged in' instead of replying."""
+    global CLAUDE_CLI_VERSION
+    exe = claude_cli()
+    if not exe:
+        return False, "the `claude` CLI is not on PATH"
+    try:
+        v = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=60)
+        CLAUDE_CLI_VERSION = (v.stdout or "").strip() or None
+    except Exception as e:
+        return False, f"could not run `claude --version`: {type(e).__name__}"
+    r = claude_chat("Reply with exactly: ok", model="sonnet", timeout=120)
+    if r["error"]:
+        return False, f"headless call failed: {r['error']}"
+    return True, f"{CLAUDE_CLI_VERSION}, test call answered by {r['model_id'] or 'an unknown model'}"
+
+
+def claude_chat(prompt, model=None, effort=None, timeout=600, system=None):
+    """One blinded headless call. Returns the same shape whatever happens - failures are reported, never
+    raised, so one bad case cannot lose a run."""
+    exe = claude_cli()
+    model = model or CLAUDE_MODEL_DEFAULT
+    effort = effort or CLAUDE_EFFORT
+    out = {"content": "", "model_id": None, "input_tokens": None, "output_tokens": None,
+           "cost_usd_list": None, "wall_s": None, "num_turns": None, "denials": 0, "error": None,
+           "model_alias": model, "effort": effort}
+    if not exe:
+        out["error"] = "claude CLI not found"
+        return out
+    cmd = [exe, "-p",
+           "--system-prompt", system or CLAUDE_SYSTEM_PROMPT,
+           "--disallowed-tools", "*",        # removes the tools, not just their permission
+           "--strict-mcp-config",            # no MCP servers
+           "--model", model,
+           "--effort", effort,
+           "--output-format", "json"]
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(claude_sandbox()), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        out["error"] = f"timeout after {timeout}s"
+        out["wall_s"] = round(time.time() - t0, 1)
+        return out
+    out["wall_s"] = round(time.time() - t0, 1)
+    try:
+        d = json.loads(r.stdout)
+    except Exception:
+        out["error"] = f"exit {r.returncode}, unparseable CLI output: {(r.stderr or r.stdout)[:200]}"
+        return out
+    out["content"] = str(d.get("result") or "")
+    out["num_turns"] = d.get("num_turns")
+    out["denials"] = len(d.get("permission_denials") or [])
+    out["cost_usd_list"] = d.get("total_cost_usd")  # list-price equivalent; billing is the subscription
+    for mid, u in (d.get("modelUsage") or {}).items():
+        if "haiku" in mid:  # the CLI makes a small background haiku call per invocation; not the answer
+            continue
+        out["model_id"] = mid
+        out["input_tokens"] = ((u.get("inputTokens") or 0) + (u.get("cacheCreationInputTokens") or 0)
+                               + (u.get("cacheReadInputTokens") or 0))
+        out["output_tokens"] = u.get("outputTokens")
+    if d.get("is_error"):
+        out["error"] = f"CLI reported an error: {out['content'][:200]}"
+    return out
+
+
+def claude_direct(case, model=None, include_artifacts=True, max_pat_rows=None,
+                  order_seed=DEFAULT_ORDER_SEED, variant=""):
+    """The direct arm answered by Claude instead of a local model: identical step-0 evidence, identical
+    instructions, identical scoring path (_direct_answer). Blinded as described above."""
+    model = model or CLAUDE_MODEL_DEFAULT
+    evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
+                            order_seed=order_seed)
+    prompt = DIRECT_INSTRUCTIONS + evidence
+    services = set(step0_metrics(case)[1])
+    source = f"claude-{model}{('-' + variant) if variant else ''}"
+    n_tok = count_tokens(prompt)  # the qwen tokenizer, for comparability with the local arms
+    attempts, data, err = [], None, None
+    for _ in range(2):  # one retry, as the Ollama arms get, in case the JSON comes back malformed
+        r = claude_chat(prompt, model=model)
+        attempts.append({k: r[k] for k in ("model_id", "model_alias", "effort", "input_tokens",
+                                           "output_tokens", "cost_usd_list", "wall_s", "num_turns",
+                                           "denials", "error")})
+        if r["error"]:
+            err = r["error"]
+            continue
+        try:
+            data = _parse_json_block(r["content"])
+            err = None
+            break
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+    extra = {"prompt_tokens": n_tok, "evidence_tokens": count_tokens(evidence), "attempts": attempts,
+             "parse_error": err if data is None else None, "order_seed": order_seed,
+             "arm_version": CLAUDE_ARM_VERSION, "temperature": "not controllable via the CLI"}
+    if data is None:
+        return {**_step3_result(case, source, None, "none", f"no usable answer ({err})", abstained=True,
+                                extra=extra), "symptoms": pd.DataFrame(columns=SYMPTOM_COLS)}
+    return _direct_answer(case, source, data, extra, services)
+
 
 # ============================================================ run records (results/<timestamp>-<label>/)
 # Every run writes its own folder, so re-runs never overwrite earlier results:

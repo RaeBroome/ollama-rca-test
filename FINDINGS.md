@@ -4,8 +4,10 @@ Can a local model (qwen2.5-coder:7b, gemma4:26b) find the root cause of a micros
 [RCAEval](https://github.com/phamquiluan/RCAEval): 735 failure cases across three systems, each with metrics,
 and depending on the suite logs and traces. Ground truth is the service the fault was injected into.
 
-**Short answer: no.** A deterministic Python ranking beat every model configuration tried, and the models got
-worse the more structure we gave them. Sample sizes are small — read the numbers with the counts attached.
+**Short answer: no.** A deterministic Python ranking beat every *local* model configuration tried, and the
+models got worse the more structure we gave them. A frontier model (claude-opus-5) on the same evidence got
+98% of the clear cases, which locates the problem: the compressed evidence is sufficient, the small local
+model is not. Sample sizes are small — read the numbers with the counts attached.
 
 ## The one-shot failure
 
@@ -58,6 +60,61 @@ cases** drawn from elsewhere in the benchmark it was 53% vs 47% — one case apa
 
 An earlier 12-case run had qwen at 80% against a 70% baseline. That was 8 correct versus 7. At 43 cases it is
 67% versus 79%.
+
+## A frontier model as a ceiling reference: the evidence was never the problem
+
+The same step-0 evidence, the same instructions, the same exact-match scoring, answered by **claude-opus-5**
+through the Claude Code CLI on a subscription login (no API key). 50 cases, one fresh blinded call each:
+
+| configuration | clear (43) | weak (7) | abstention | median time |
+|---|---|---|---|---|
+| **claude-opus-5, plain evidence** | **98%** (42/43) | 57% (4/7) | 0% | 7.5 s |
+| Python baseline (control) | 79% (34/43) | 43% (3/7) | — | — |
+| qwen2.5-coder:7b, plain evidence | 67% (29/43) | 43% | 0% | 7.9 s |
+| gemma4:26b, plain evidence | 65% (28/43) | 71% (5/7) | 5% | 23.3 s |
+
+**This answers the project's central question.** Every earlier result was consistent with two very different
+explanations: either step 0 throws away what a diagnosis needs, or a 7B-26B local model cannot use it. On
+the clear cases a frontier model reads the same compressed evidence and gets 42 of 43. The evidence is
+sufficient; the limit was the local model.
+
+Its answers were a strict superset of the control's: **8 clear cases it got that the control missed, and
+none the control got that it missed.** Two of those eight were missed by the control *and* both local
+models — `re1ss_carts_loss_1` (control and qwen said `orders`) and `re2ob_checkoutservice_delay_1` (control
+said `emailservice`, both local models said `recommendationservice`). Four of the eight are cases where the
+control crowns a caller or a database: `re3ss_orders_f1_1` and `re3ss_orders_f3_1` (control: `front-end`),
+`re3ob_adservice_f3_1` and `re3ob_cartservice_f1_1` (control: `frontend`). Origin-versus-victim is exactly
+where a ranking by signal strength fails and reading the evidence wins.
+
+The single clear-case miss is instructive rather than sloppy: on `re1tt_ts-auth-service_loss_1` it answered
+`ts-contacts-service`, arguing that service showed still-climbing CPU saturation while its callers showed
+only downstream latency step-ups. That is the correct reasoning pattern applied to a service that was not
+the injection point.
+
+**Abstention fails here too.** Zero abstentions in 50 calls, including all 7 weak-evidence cases. Confidence
+carries a little information where abstention carries none: 28 of 29 `high` answers were right against 18 of
+21 `medium`. Every model we have tried, local or frontier, answers rather than declines.
+
+### This arm is not like-for-like, and the reason is worth stating
+
+The Claude Code CLI exposes no temperature, top-p or seed. **This arm cannot be pinned to temperature 0, as
+every Ollama arm is.** `--effort` is fixed at `medium` and recorded, but the arm is sampled at whatever
+defaults the CLI uses, and the call also carries a small Claude Code scaffold rather than being a bare chat
+request. Combined with the earlier finding that temperature 0 is not itself determinism, treat 98% as a
+ceiling reference measured once, not a controlled comparison against the local numbers. An exact
+apples-to-apples run needs the API with temperature 0.
+
+What it is blinded against was checked rather than assumed: tools removed (`--disallowed-tools "*"`, which
+drops the tool definitions rather than only denying them), the CLI run from an empty directory outside the
+repo so `CLAUDE.md` is never discovered, no MCP servers, Claude Code's own system prompt replaced, and one
+fresh process per case so no case can inform another. Asked in that exact configuration what context it
+had, the model reported no project instructions, no memory files, no repository listing and nothing about
+RCAEval. The residue is an environment block naming the sandbox directory. Prompt sizes matched the local
+plain arm on all 50 cases, so the evidence really was identical.
+
+Cost, for scale: 50 calls, 6.3 minutes of model time, about $5 of list-price equivalent consumed from a Max
+subscription. The local arms are free and run offline, which is the whole point of asking whether they are
+good enough.
 
 ## The models get worse as we add structure
 

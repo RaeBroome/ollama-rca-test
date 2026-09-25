@@ -1,0 +1,4 @@
+case,status,truth,claude,claude_ok,control_answer,control,direct:qwen2.5-coder:7b,direct:gemma4:26b
+re3ss_carts_f1_1,clear,carts,carts,True,carts,True,False,True
+re3ss_orders_f3_1,clear,orders,orders,True,front-end,False,True,False
+re2ob_checkoutservice_disk_1,clear,checkoutservice,checkoutservice,True,checkoutservice,True,False,False

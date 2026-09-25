@@ -50,6 +50,13 @@ Useful flags: `--cases <ids>`, `--preset50` (50-case stratified sample), `--mode
 loaded at the end), `--quickstart` (check the setup and stop). Model calls are batched by model, so a run
 swaps models a few times, not once per case.
 
+`--claude opus` adds a **ceiling reference**: the same evidence answered by Claude through the Claude Code
+CLI, authenticated by your own subscription login rather than an API key. It needs `claude` on PATH and a
+completed `claude` login, uses no GPU, and is skipped with a printed reason if either is missing. The call is
+blinded — tools removed, run from an empty directory outside the repo, Claude Code's system prompt replaced,
+one process per case — but the CLI exposes no temperature setting, so this arm alone is not pinned to
+temperature 0. See [FINDINGS.md](FINDINGS.md); compare a run with `python compare_claude_arm.py <run>`.
+
 **The default 12-case preset is for checking that a model works, not for drawing conclusions.** One case is
 worth 8 points there, and both of its headline results reversed at 50 cases: qwen scored 80% on 12 (8 correct
 of 10 clear cases) and 67% on 50, while gemma looked clearly worse than qwen on 12 and turned out level or

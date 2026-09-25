@@ -23,14 +23,17 @@ import argparse
 import time
 from pathlib import Path
 
-from rca_lib import (ANSWER_RESERVE, CAPPED_PAT_ROWS, DATA_DIR, MODELS_DEFAULT, SAMPLE12, SAMPLE50,
-                     answer_reserve_for, direct_llm, ensure_only, gpu_memory_mb, model_supports_thinking,
-                     ollama_models, ollama_unload, ollama_url, ollama_version, resolve_model, start_run,
-                     step1_llm, step1_python, step2_llm, step2_python, step3_llm, step3_python)
+from rca_lib import (ANSWER_RESERVE, CAPPED_PAT_ROWS, CLAUDE_ARM_VERSION, CLAUDE_EFFORT,
+                     CLAUDE_SYSTEM_PROMPT, DATA_DIR, MODELS_DEFAULT, SAMPLE12, SAMPLE50,
+                     answer_reserve_for, claude_available, claude_direct, claude_sandbox, direct_llm,
+                     ensure_only, gpu_memory_mb, model_supports_thinking, ollama_models, ollama_unload,
+                     ollama_url, ollama_version, resolve_model, start_run, step1_llm, step1_python,
+                     step2_llm, step2_python, step3_llm, step3_python)
+import rca_lib
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
-        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False):
+        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False, claude_models=()):
     w = start_run(label, notes=notes or f"{len(cases)} cases, models={models if use_llm else 'none'}")
     print("run dir:", w.dir, flush=True)
     t0 = time.time()
@@ -89,6 +92,33 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                         w.add(case, "step3", r3["meta"]["source"], r3)
                 print(f"{tag} {case:32s} {time.time() - t0:.0f}s", flush=True)
 
+    # ---- the Claude reference arm (subscription CLI, no Ollama involvement, no GPU)
+    claude_meta = {}
+    if claude_models:
+        ok, detail = claude_available()
+        print(f"claude arm: {'ready' if ok else 'SKIPPED'} - {detail}", flush=True)
+        claude_meta = {"available": ok, "detail": detail, "cli_version": rca_lib.CLAUDE_CLI_VERSION,
+                       "effort": CLAUDE_EFFORT, "system_prompt": CLAUDE_SYSTEM_PROMPT,
+                       "arm_version": CLAUDE_ARM_VERSION, "sandbox_cwd": str(claude_sandbox()),
+                       "flags": ["-p", "--disallowed-tools *", "--strict-mcp-config", "--system-prompt",
+                                 "--effort", "--output-format json"],
+                       "temperature": "NOT controllable via the CLI - this arm is not pinned to "
+                                      "temperature 0 like the Ollama arms",
+                       "auth": "the machine's Claude subscription login (OAuth), no API key",
+                       "models_requested": list(claude_models), "model_ids": [], "cost_usd_list": 0.0}
+        if ok:
+            for cm in claude_models:
+                for i, case in enumerate(cases, 1):
+                    rc = claude_direct(case, model=cm)
+                    w.add(case, "direct", rc["meta"]["source"], rc)
+                    a = rc["meta"]["attempts"][-1]
+                    if a.get("model_id") and a["model_id"] not in claude_meta["model_ids"]:
+                        claude_meta["model_ids"].append(a["model_id"])
+                    claude_meta["cost_usd_list"] += (a.get("cost_usd_list") or 0)
+                    print(f"claude:{cm:6s} [{i:>2}/{len(cases)}] {case:32s} "
+                          f"answer={rc['meta']['answer']} {a.get('wall_s')}s"
+                          + (f" ERROR {a['error']}" if a.get("error") else ""), flush=True)
+
     # ---- Python step 3 on every chain (free)
     for (case, chain), r2 in list(s2.items()):  # includes the control chain whenever Python step 1/2 ran
         for rule in step3_rules:
@@ -102,7 +132,8 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
             if ollama_unload(model):
                 print(f"unloaded {model}", flush=True)
     summary = w.finalize(extra_meta={"cases": list(cases), "models": models if use_llm else [],
-                                     "use_llm": use_llm, "command": "run_sample.py", "keep_warm": keep_warm})
+                                     "use_llm": use_llm, "command": "run_sample.py", "keep_warm": keep_warm,
+                                     **({"claude_arm": claude_meta} if claude_meta else {})})
     print(f"\nrecords: {w.n} | summary rows: {len(summary)} | {time.time() - t0:.0f}s")
     print(w.dir)
     return w.dir
@@ -229,6 +260,9 @@ def main():
                     help="direct variants: plain, capped (~2k tokens), roles (+ step-2 role labels), facts (+ raw call graph)")
     ap.add_argument("--direct-only", action="store_true", help="skip the staged step-1/2/3 LLM arms")
     ap.add_argument("--preset50", action="store_true", help="use the 50-case stratified sample")
+    ap.add_argument("--claude", nargs="*", default=None, metavar="ALIAS",
+                    help="also run the Claude reference arm via the Claude Code CLI on this machine's "
+                         "subscription (e.g. --claude opus sonnet); no API key, no temperature control")
     ap.add_argument("--keep-warm", action="store_true",
                     help="leave the model loaded at the end (default: unload, freeing VRAM)")
     ap.add_argument("--quickstart", action="store_true",
@@ -241,7 +275,8 @@ def main():
     cases = a.cases or (SAMPLE50 if a.preset50 else [c for c, _ in SAMPLE12])
     direct = a.direct or (["plain"] if a.direct_only else [])
     run(cases, models, a.label, notes=a.notes, use_llm=not a.no_llm,
-        staged=not a.direct_only, direct=direct, keep_warm=a.keep_warm)
+        staged=not a.direct_only, direct=direct, keep_warm=a.keep_warm,
+        claude_models=() if a.claude is None else (a.claude or ["opus"]))
 
 
 if __name__ == "__main__":
