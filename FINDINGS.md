@@ -167,6 +167,17 @@ answer.
   characters of reasoning, no answer), so "gemma" means gemma-no-think throughout.
 - **Thresholds are provisional** and deliberately untuned on the cases inspected. The detection limit for a
   slow drift over a 360 s window is roughly +15% on a quiet metric, worse on a bursty one.
+- **The borderline classification is a candidate fix, not yet tested.** Interrogating the records afterwards
+  showed that in 2 of the 7 weak cases the *largest* signal in the whole case belonged to the true root cause
+  and was demoted to the one-line "Weak changes (near a detection threshold)" footnote: `re1ob_adservice_loss_1`
+  (latency-90, z=3571, x36.71) and `re1ob_cartservice_loss_4` (latency-90, z=1366, x30.31). In both, a victim
+  service with a far smaller change (x6.12, x1.55) got a full evidence row, and every arm — baseline, both
+  local models and Claude — answered that victim. Promoting a borderline shape to a full row when its size is
+  that extreme is the obvious thing to try. Two constraints: it has to be validated on **fresh** weak cases,
+  because these two are now inspected and tuning on them is exactly the trap this project avoids; and because
+  it changes step 0, it invalidates every step-1/2/3 and direct-arm number here, including the ceiling arm, so
+  it needs a full re-baseline before any before/after comparison means anything. Until then, the weak-case
+  numbers partly measure this classifier rather than the models.
 - **One shuffle seed** for service order. Ordering was tested and mattered little, but was not averaged over
   seeds.
 - **A likely injection artifact is still in the evidence.** `{svc}_diskio` appearing after injection
