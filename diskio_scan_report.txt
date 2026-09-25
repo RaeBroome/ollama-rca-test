@@ -1,0 +1,43 @@
+  50/735 cases, 1s
+  100/735 cases, 1s
+  150/735 cases, 2s
+  200/735 cases, 3s
+  250/735 cases, 3s
+  300/735 cases, 4s
+  350/735 cases, 5s
+  400/735 cases, 8s
+  450/735 cases, 10s
+  500/735 cases, 12s
+  550/735 cases, 15s
+  600/735 cases, 29s
+  650/735 cases, 43s
+  700/735 cases, 45s
+
+================================================================================================
+scanned 733 cases (0 unreadable), 49s
+  cases with at least one diskio metric column:   360
+  cases where some service's diskio APPEARS:      25
+  of those, the true root cause is one of them:   17  (68%)   <- the 17-of-18 claim
+  of those, the truth is the ONLY one:            15  (60%)
+  precision over flagged services (not cases):    17/27  (63%)
+
+  by fault type (does it hold for non-disk and code faults?)
+           cases  truth_flagged  rate_%
+    fault                              
+    disk       9              8    89.0
+    f1         5              2    40.0
+    f3         4              4   100.0
+    f4         3              3   100.0
+    loss       2              0     0.0
+
+  by suite
+           cases  truth_flagged  rate_%
+    suite                              
+    re2       13              8    62.0
+    re3       12              9    75.0
+
+  how much of the benchmark is even exposed to this:
+    25/733 cases (3%) contain an appearing diskio
+    17/733 cases (2%) have it on the true root cause
+
+wrote diskio_scan.csv

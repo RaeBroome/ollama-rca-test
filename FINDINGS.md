@@ -230,11 +230,19 @@ answer.
   constraints in [issue #1](https://github.com/RaeBroome/ollama-rca-test/issues/1).
 - **One shuffle seed** for service order. Ordering was tested and mattered little, but was not averaged over
   seeds.
-- **A likely injection artifact is still in the evidence.** `{svc}_diskio` appearing after injection
-  identifies the root-cause service in 17 of 18 cases, including code-level faults, which suggests it
-  reflects the redeploy mechanism rather than the fault. It is flagged in the evidence, but no score here has
-  been recomputed with it removed, so every clear-case number above may be inflated by an unmeasured amount.
-  Tracked in [issue #2](https://github.com/RaeBroome/ollama-rca-test/issues/2).
+- **An injection artifact is in the evidence, and it does not affect any score here** (measured, issue #2).
+  `{svc}_diskio` appearing after injection does look like the redeploy used to inject the fault rather than
+  the fault itself: scanning all 733 readable cases (`scan_diskio.py`), 25 contain an appearing diskio and the
+  true root cause is one of them in **17 (68%)**, including code-level faults (f3 4/4, f4 3/3, disk 8/9). An
+  earlier note in `explore.ipynb` put this at 17 of 18, i.e. 94% - the numerator was right and the denominator
+  was not; the scan that produced it is not reproducible from committed code. The artifact reaches too little
+  of the benchmark to inflate anything: 25 of 733 cases (3%), 17 (2%) on the true root cause. Re-scoring the
+  Python arms with the artifact dropped before ranking (`analyse_diskio.py`, exact and deterministic) changed
+  **no answer and no score**: py3:top1 34/43 both ways, py3:role 24/43 both ways, weak cases 3/7 both ways. In
+  the 50-case sample only 4 cases carry it at all, and in every case where the truth carries it the truth also
+  has clear non-artifact evidence, so it is never load-bearing. Not re-measured for the LLM arms, which would
+  need re-asking them with changed evidence; their conditional split runs the other way (local models score
+  *worse* on flagged cases).
 - **The ceiling arm's reasoning cannot be audited.** Claude returned an answer, a confidence and a
   justification but no `signals` array, so nothing records which evidence it used — 42/43 is a score without
   a visible chain of reasoning behind it, and it cannot be checked for shortcuts such as leaning on the
