@@ -7,9 +7,10 @@ logs and traces, where the ground truth is the service a fault was injected into
 
 **The answer, in one paragraph.** Given the same compressed evidence — a median of 43 lines describing what
 changed after the fault — claude-opus-5 names the right service in **98%** of the clear-evidence cases, a
-plain Python ranking gets **79%**, and the local models get **65–67%**. So the compression is not the
-bottleneck: everything a diagnosis needs survives it, and a capable model reads it almost perfectly. The
-local models are the bottleneck. Two further results hold at every model size: giving a model more of *our*
+plain Python ranking gets **79%**, and the local models get **65–67%**. So on those cases the compression is
+not the bottleneck: what a diagnosis needs survives it, and a capable model reads it almost perfectly. The
+local models are. That scope matters: on the 7 weak-evidence cases nothing exceeds 71%, and the weak category
+is defined by our own compression giving the true cause no clear signal — see the limitations. Two further results hold at every model size: giving a model more of *our*
 structure (rankings, role labels) makes it **worse**, not better; and no model, local or frontier, ever
 declines to answer when the evidence does not support one.
 
@@ -67,7 +68,7 @@ separately. Every arm may answer `"none"`; abstentions are counted apart from wr
 | gemma4:26b — plain evidence | 65% (28/43) | 5% | 23.3 s |
 | qwen2.5-coder:7b — capped evidence | 65% | 0% | 3.4 s |
 | gemma / qwen — evidence + our role labels | 51% / 51% | 12% / 2% | 23.2 / 7.8 s |
-| either model — a ranked candidate list from Python | 25–40% | — | — |
+| either model — a ranked candidate list from Python (10 clear cases only) | 20–40% | — | — |
 
 **Weak-evidence cases (7 in the same sample).** Small enough that one case is 14 points:
 
@@ -87,24 +88,46 @@ the eight are cases where the baseline crowns a caller instead of the cause (`re
 Two were missed by the baseline *and* both local models. Origin-versus-victim is exactly where ranking by
 signal strength fails and reading the evidence wins.
 
+**No clear case defeated every arm.** All 43 were solved by at least one of the six configurations; 17 were
+solved by all six, and only 2 by a single arm. Nothing in this sample is beyond the compressed evidence.
+
+**The local models' errors concentrate on one service name.** In Online Boutique, **6 of qwen's 6 wrong
+answers and 6 of gemma's 7 were `recommendationservice`** — out of roughly 11 candidates, which is not random
+error but a fixed attractor, the loudest-service bias surviving compression. The baseline's errors instead
+land on the entry point (`frontend` / `front-end`, 4 of its 9). Claude's single error was a service no other
+arm named.
+
 ## The three findings that matter
 
-**1. The compression works, and it is sufficient.** This is what the ceiling arm buys. Every earlier result
-was consistent with two very different stories: either step 0 throws away what a diagnosis needs, or a
+**1. The compression is sufficient on the clear cases.** This is what the ceiling arm buys. Every earlier
+result was consistent with two very different stories: either step 0 throws away what a diagnosis needs, or a
 7B–26B model cannot use what it keeps. A frontier model reading the *identical* text — prompt sizes matched
-the local arm on all 50 cases — gets 42 of 43. The reduction from 84,665 log lines to 43 preserves the
-answer. Effort spent on better compression has little left to win; effort spent on the model has ~30 points
-available.
+the local arm on all 50 cases — gets 42 of 43 clear cases. There, the reduction from 84,665 log lines to 43
+preserves the answer, and effort spent on better compression has little left to win while effort spent on the
+model has ~30 points available.
+
+The claim stops at the clear cases, and deliberately. A case counts as "clear" precisely when step 0 gave the
+true root cause at least one clear signal, so 98% says the compression is sufficient *on the cases where it
+worked* — it cannot speak for the 7 where it did not. On those, the ceiling is 57% and the best score is
+gemma's 71%, and at least 2 of the 7 look like a classification fault in step 0 rather than faint telemetry
+(see the borderline limitation). Compression is not a solved problem; it is solved for the 86% of cases that
+land in the clear bucket.
 
 **2. More structure makes local models worse.** Each layer of our own interpretation cost accuracy, in a
 consistent order:
 
-| what the model receives | accuracy |
-|---|---|
-| raw evidence | 67% |
-| evidence + the call graph as plain facts | identical answers on all 12 cases tested |
-| evidence + dependency role labels (origin / victim), no ranking | 51% |
-| a ranked candidate list from Python | 25–40% |
+| what the model receives | model | cases | accuracy |
+|---|---|---|---|
+| raw evidence | qwen2.5-coder:7b | 43 clear | 67% (29/43) |
+| raw evidence | gemma4:26b | 43 clear | 65% (28/43) |
+| evidence + the call graph as plain facts | qwen2.5-coder:7b | 12 | identical answers to raw, all 12 |
+| evidence + role labels (origin / victim), no ranking | qwen2.5-coder:7b | 43 clear | 51% (22/43) |
+| evidence + role labels (origin / victim), no ranking | gemma4:26b | 43 clear | 51% (22/43) |
+| a ranked candidate list from Python (it decides only) | qwen2.5-coder:7b | 10 clear | 40% (4/10) |
+| a ranked candidate list from Python (it decides only) | gemma4:26b | 10 clear | 20% (2/10) |
+
+The bottom two rows come from the 12-case run, so they are 10 clear cases and the weakest-evidenced row here;
+the gradient above them is measured on all 43.
 
 Facts are ignored; conclusions are harmful. Handing the model our ranking was the single worst thing we did
 to it — it anchors on our answer and stops reading. This inverts the intuition that a small model needs more
@@ -122,8 +145,9 @@ information where abstention carries none (Claude: 28 of 29 `high` answers corre
 
 **The approach is sound, and it improves for free.** The pipeline is model-agnostic: step 0 is deterministic
 Python, and the model is a swap. The ceiling result says the scaffolding is already good enough for
-near-perfect diagnosis on clear cases, so local capability is the only variable — and that is the variable
-improving fastest. A stronger local model should land between 67% and 98% with no change to this repo.
+near-perfect diagnosis on clear cases, so on those cases local capability is the only variable left — and it
+is the variable improving fastest. Whether a stronger local model lands anywhere near the ceiling is
+**untested**: only two local models were run, and nothing here measures how accuracy scales with model size.
 
 **Today, air-gapping costs about 30 points** on clear cases (98% → 67%), and roughly 12 points against just
 using deterministic Python (79% → 67%). If a local model is a hard constraint, the honest configuration is
@@ -131,6 +155,27 @@ using deterministic Python (79% → 67%). If a local model is a hard constraint,
 baseline is better, free, instant, and reproducible. If data can leave the building, a frontier model on
 compressed evidence is both more accurate and cheap at this volume: 50 cases was 6.3 minutes and about $5 of
 list-price equivalent.
+
+**Two cheap arms cover nearly as much as the expensive one, and their agreement is a usable signal.** The
+baseline and the local models fail on *different* cases — neither is a subset of the other (qwen is right on 6
+cases where the baseline is wrong, the baseline on 11 where qwen is wrong):
+
+| configuration | clear cases covered |
+|---|---|
+| Python baseline alone | 34/43 (79%) |
+| qwen2.5-coder:7b alone | 29/43 (67%) |
+| baseline **or** qwen right | 40/43 (93%) |
+| baseline **or** qwen **or** gemma right | 41/43 (95%) |
+| claude-opus-5 alone | 42/43 (98%) |
+
+Better still, the two cheap arms know when to doubt themselves, which neither does alone. **They agree on 24
+of 43 clear cases, and that shared answer is right 96% of the time. On the 19 where they disagree, one of the
+two is right 89% of the time.** So the cheapest useful configuration is not one arm but both: take the answer
+when they agree, and on disagreement present both candidates with their evidence instead of a verdict. That
+buys a high-confidence subset covering more than half the cases, plus a two-item shortlist for the rest, with
+no external call and no GPU beyond a 7B model. It is the most actionable result here. Two caveats: nothing
+measured predicts *which* arm is right on a disagreement, so it narrows rather than decides; and these are
+43 cases, so the 96% is 23 of 24.
 
 **The abstention gap is the sharper operational risk.** A diagnostic tool that is wrong 20–35% of the time
 but *never says so* is worse than its accuracy suggests, because every answer arrives in the same confident
