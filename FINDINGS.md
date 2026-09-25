@@ -5,14 +5,23 @@ logs and traces, where the ground truth is the service a fault was injected into
 20 GB GPU — `qwen2.5-coder:7b` and `gemma4:26b` — against a deterministic Python baseline, and against
 `claude-opus-5` as a ceiling reference.
 
-**The answer, in one paragraph.** Given the same compressed evidence — a median of 43 lines describing what
-changed after the fault — claude-opus-5 names the right service in **98%** of the clear-evidence cases, a
-plain Python ranking gets **79%**, and the local models get **65–67%**. So on those cases the compression is
-not the bottleneck: what a diagnosis needs survives it, and a capable model reads it almost perfectly. The
-local models are. That scope matters: on the 7 weak-evidence cases nothing exceeds 71%, and the weak category
-is defined by our own compression giving the true cause no clear signal — see the limitations. Two further results hold at every model size: giving a model more of *our*
-structure (rankings, role labels) makes it **worse**, not better; and no model, local or frontier, ever
-declines to answer when the evidence does not support one.
+**The answer, in short.** Given the same compressed evidence — a median of 43 lines describing what changed
+after the fault — the accuracy on the 43 clear-evidence cases is:
+
+- **claude-opus-5** — 98%
+- **Python baseline** — 79%
+- **local models** — 65–67%
+
+So on those cases the compression is not the bottleneck. What a diagnosis needs survives it, and a capable
+model reads it almost perfectly. The local models are the limit.
+
+That scope matters: on the 7 weak-evidence cases nothing exceeds 71%, and the weak category is defined by our
+own compression giving the true cause no clear signal — see the limitations.
+
+Two further results hold at every model size:
+
+- Giving a model more of *our* structure (rankings, role labels) makes it **worse**, not better.
+- No model, local or frontier, ever declines to answer when the evidence does not support one.
 
 ---
 
