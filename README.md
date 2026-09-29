@@ -15,7 +15,8 @@ the compression is sufficient and the local model is the limit. Results and conc
   Optional: `matplotlib`, `nbformat`, `nbclient`, `ipykernel` (for `explore.ipynb`), `tokenizers` +
   `huggingface_hub` (exact token counts; without them counts fall back to characters/3.5).
 - **[Ollama](https://ollama.com)** (developed against 0.34.x; older versions work — the harness detects
-  missing endpoints and degrades). Set `OLLAMA_HOST` if it is not on `127.0.0.1:11434`. Models pulled:
+  missing endpoints and degrades). Set `OLLAMA_HOST` if it is not on `127.0.0.1:11434`. The runs in
+  `results/` used these models; pull them only to reproduce those runs, or pass any other model with `--models`:
   ```bash
   ollama pull qwen2.5-coder:7b     # 4.7 GB
   ollama pull gemma4:26b           # 18 GB
