@@ -2106,7 +2106,7 @@ def claude_direct(case, model=None, include_artifacts=True, max_pat_rows=None,
 #   summary.csv        one row per case per arm, openable in any spreadsheet
 #   metadata.json      step versions, thresholds, seed, models, timings, GPU
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-MODELS_DEFAULT = ("qwen2.5-coder:7b", "gemma4:26b")
+MODELS_DEFAULT = ("gemma4:26b",)  # the model with 50-case runs behind it; the committed qwen runs pass --models
 SAMPLE12 = [  # the hand-picked inspection set: fault kinds, signal shapes, sizes, and 2 weak-evidence cases
     ("re3ss_carts_f1_1", "RE3 redeploy, WARN signal"),
     ("re3ss_carts_f3_1", "RE3 same signature as f1"),

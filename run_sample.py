@@ -1,8 +1,8 @@
 """Run the RCA pipeline (step 1 -> 2 -> 3) over a set of cases and write a results/ run folder.
 
-Reproduce the committed 12-case run:
+Reproduce the committed 12-case run (it used both models; the default is now gemma4:26b only):
 
-    python run_sample.py --label sample12-full-pipeline
+    python run_sample.py --models qwen2.5-coder:7b gemma4:26b --label sample12-full-pipeline
 
 First time here? Check the setup and measure your hardware before committing to
 a long run - this checks Ollama and the dataset, times one case, and prints the
@@ -15,8 +15,8 @@ Cheap variants (no Ollama calls, seconds rather than an hour):
     python run_sample.py --cases re3ss_carts_f1_1 --no-llm --label smoke
     python run_sample.py --no-llm --label python-only              # the default 12-case sample
 
-Model calls are batched by model (one resident at a time: the two models do not
-fit on a 20 GB card together). Records are written incrementally, so a crash
+Model calls are batched by model (one resident at a time: gemma4:26b alone takes
+~19 GB of a 20 GB card). Records are written incrementally, so a crash
 keeps everything produced up to that point.
 """
 import argparse
@@ -152,7 +152,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
 
 def _print_installed(installed):
     if not installed:
-        print("              (none installed - pull one, e.g. `ollama pull qwen2.5-coder:7b`)")
+        print("              (none installed - pull one, e.g. `ollama pull gemma4:26b`)")
         return
     print("              installed models:")
     for m in installed:

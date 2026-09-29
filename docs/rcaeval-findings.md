@@ -253,9 +253,9 @@ item, whether it survived compression (`retention.parquet`, one row per item wit
 
 **Unfinished**
 
-- **`MODELS_DEFAULT` is still `("qwen2.5-coder:7b", "gemma4:26b")`** while `results/` now contains
-  `qwen3.6:27b` runs from 2026-09-25 (1-case and 12-case). Those runs are not reflected in FINDINGS, and the
-  12-case preset they used is explicitly not a basis for conclusions.
+- **`results/` contains `qwen3.6:27b` runs from 2026-09-25** (1-case and 12-case). Those runs are not
+  reflected in FINDINGS, and the 12-case preset they used is explicitly not a basis for conclusions.
+  `MODELS_DEFAULT` is now `("gemma4:26b",)`; the committed two-model runs name both models with `--models`.
 - **The LLM arms were never re-scored without the `diskio` artifact.** The Python counterfactual is exact and
   showed no change, but re-scoring a model means re-asking it with different evidence, which is a step-0
   change; it was left for whenever #1 forces a re-baseline anyway.

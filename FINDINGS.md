@@ -333,7 +333,7 @@ edges were restricted to call-shaped contexts.
 ```bash
 python run_sample.py --quickstart --models <model>   # check setup, time one case, print estimates
 python run_sample.py --no-llm --label baseline       # the Python arms only
-python run_sample.py --preset50 --direct plain capped roles --direct-only --label direct50
+python run_sample.py --models qwen2.5-coder:7b gemma4:26b --preset50 --direct plain capped roles --direct-only --label direct50
 python run_sample.py --preset50 --no-llm --claude opus --label ceiling
 python analyse_run.py results/<run>                  # accuracy by arm, never pooled
 python compare_claude_arm.py results/<run>           # the ceiling comparison, clear and weak separate
