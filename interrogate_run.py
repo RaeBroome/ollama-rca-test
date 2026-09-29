@@ -45,6 +45,12 @@ def _arm(df, arm):
     return df[df.arm == arm].drop_duplicates("case").set_index("case")
 
 
+def _no_output(df):
+    """Rows where the model hit its token limit with empty content: neither right, wrong nor an abstention,
+    so they are left out of every correctness count (as in analyse_run.py). Older runs have no such column."""
+    return df["no_output"].fillna(False).astype(bool) if "no_output" in df else pd.Series(False, index=df.index)
+
+
 def joined():
     """One row per case: status, truth, and each arm's answer and correctness."""
     c, l = pd.read_csv(f"{CLAUDE_RUN}/summary.csv"), pd.read_csv(f"{LOCAL_RUN}/summary.csv")
@@ -58,7 +64,8 @@ def joined():
              "system": m.group(2) if m else "?", "fault": m.group(3) if m else "?",
              "tokens": int(arms["claude"].at[case, "prompt_tokens"])}
         for name, d in arms.items():
-            r[name] = bool(d.at[case, "correct"]) if case in d.index else None
+            scored = case in d.index and not _no_output(d).get(case, False)  # no output counts like "not run"
+            r[name] = bool(d.at[case, "correct"]) if scored else None
             r[name + "_ans"] = d.at[case, "answer"] if case in d.index else None
         rows.append(r)
     return pd.DataFrame(rows)
@@ -114,6 +121,7 @@ def confidence(t):
     print("\n== confidence: the ceiling arm's stated confidence against correctness")
     c = pd.read_csv(f"{CLAUDE_RUN}/summary.csv")
     a = _arm(c, CLAUDE_ARM)
+    a = a[~_no_output(a)]
     x = pd.crosstab(a.confidence, a.correct)
     print("  " + x.to_string().replace("\n", "\n  "))
     for conf in a.confidence.dropna().unique():
@@ -201,6 +209,7 @@ def abstain(t):
     print("\n== abstain: do abstentions land where the baseline is wrong?")
     s = pd.read_csv(f"{STAGED_RUN}/summary.csv")
     ctl = _arm(s, CONTROL)
+    ctl = ctl[~_no_output(ctl)]
     llm = s[s.arm.str.contains("llm3", na=False)]
     ab = llm[llm.abstained.astype(bool)]
     hit = sum(1 for r in ab.itertuples() if r.case in ctl.index and not bool(ctl.at[r.case, "correct"]))

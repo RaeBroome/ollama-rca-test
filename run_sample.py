@@ -33,11 +33,19 @@ import rca_lib
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
-        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False, claude_models=()):
+        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False, claude_models=(), think=False):
     w = start_run(label, notes=notes or f"{len(cases)} cases, models={models if use_llm else 'none'}")
     print("run dir:", w.dir, flush=True)
     t0 = time.time()
     s1, s2 = {}, {}
+    # What each model actually ran with. Arm names only carry "-think" when thinking really ran, so a
+    # --think run on a model without the capability is labelled as the no-think arm it is.
+    thinking_by_model = {m: think and model_supports_thinking(m) for m in models} if use_llm else {}
+    if think and use_llm:
+        print(f"--think: thinking budget THINKING_EXTRA = {rca_lib.THINKING_EXTRA} tokens", flush=True)
+        for m, on in thinking_by_model.items():
+            if not on:
+                print(f"--think: {m} has no thinking capability - it runs with thinking OFF", flush=True)
 
     def add_python_step2(case, s1key):
         for rule in step2_rules:
@@ -59,6 +67,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
         for model in models:
             ensure_only(model)
             tag = model.split("/")[-1].split(":")[0]  # any model, not just our two
+            th = thinking_by_model[model]
             for case in cases:
                 for variant in direct:  # step-0 evidence straight to a final answer, no Python ranking
                     kw = {}
@@ -70,25 +79,26 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                         kw["roles_from"] = s2.get((case, "python:strength+py2:rule"))
                         if kw["roles_from"] is None:
                             continue
-                    rd = direct_llm(case, model=model, thinking=False,
+                    rd = direct_llm(case, model=model, thinking=th,
                                     variant="" if variant == "plain" else variant, **kw)
                     w.add(case, "direct", rd["meta"]["source"], rd)
                     print(f"direct:{variant:6s} {tag} {case:32s} answer={rd['meta']['answer']} "
-                          f"{rd['meta']['attempts'][-1]['wall_s']}s", flush=True)
+                          f"{rd['meta']['attempts'][-1]['wall_s']}s"
+                          + (" NO OUTPUT (hit the token limit)" if rd["meta"].get("no_output") else ""), flush=True)
                 if not staged:
                     continue
-                r = step1_llm(case, model=model, thinking=False)
+                r = step1_llm(case, model=model, thinking=th)
                 s1[(case, tag)] = r
                 w.add(case, "step1", r["meta"]["source"], r)
                 add_python_step2(case, tag)
                 for s1key in ("python:strength", tag):
-                    r2 = step2_llm(case, s1[(case, s1key)], model=model, thinking=False)
+                    r2 = step2_llm(case, s1[(case, s1key)], model=model, thinking=th)
                     s2[(case, f"{s1key}+llm2:{tag}")] = r2
                     w.add(case, "step2", r2["meta"]["source"], r2)
                 for chain in (f"python:strength+py2:rule", f"python:strength+llm2:{tag}",
                               f"{tag}+py2:rule", f"{tag}+llm2:{tag}"):
                     if (case, chain) in s2:
-                        r3 = step3_llm(case, s2[(case, chain)], model=model, thinking=False)
+                        r3 = step3_llm(case, s2[(case, chain)], model=model, thinking=th)
                         w.add(case, "step3", r3["meta"]["source"], r3)
                 print(f"{tag} {case:32s} {time.time() - t0:.0f}s", flush=True)
 
@@ -133,6 +143,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                 print(f"unloaded {model}", flush=True)
     summary = w.finalize(extra_meta={"cases": list(cases), "models": models if use_llm else [],
                                      "use_llm": use_llm, "command": "run_sample.py", "keep_warm": keep_warm,
+                                     "think_requested": think, "thinking_by_model": thinking_by_model,
                                      **({"claude_arm": claude_meta} if claude_meta else {})})
     print(f"\nrecords: {w.n} | summary rows: {len(summary)} | {time.time() - t0:.0f}s")
     print(w.dir)
@@ -148,7 +159,7 @@ def _print_installed(installed):
         print(f"                {m['name']:32s} {m['size_gb']:>6.1f} GB")
 
 
-def quickstart(models, case="re3ss_carts_f1_1"):
+def quickstart(models, case="re3ss_carts_f1_1", think=False, think_flags=""):
     """Check the setup, time one case, and print the commands for a real run. Runs one case only.
     Everything here degrades: a missing endpoint, tool or model is reported, never raised."""
     print("== checking the setup\n")
@@ -199,15 +210,22 @@ def quickstart(models, case="re3ss_carts_f1_1"):
                "              result to show whether a run spilled to CPU; expect slower calls on CPU.")
 
     print()
+    thinking_by_model = {}
     for m in models:
-        thinking = model_supports_thinking(m)
+        capable = model_supports_thinking(m)
+        thinking_by_model[m] = think and capable
         known = m in ANSWER_RESERVE
-        print(f"  {m}: thinking capability = {thinking}")
-        if thinking:
-            print(f"  {' ' * len(m)}  runs with thinking OFF. Some thinking models never stop reasoning on these")
-            print(f"  {' ' * len(m)}  prompts (gemma4:26b produced 52k characters and no answer). If answers come")
-            print(f"  {' ' * len(m)}  back empty, check done_reason=length with a large thinking field.")
-        print(f"  {' ' * len(m)}  answer reserve = {answer_reserve_for(m)} tokens"
+        pad = " " * len(m)
+        print(f"  {m}: thinking capability = {capable}")
+        if think and capable:
+            print(f"  {pad}  runs with thinking ON (--think), budget {rca_lib.THINKING_EXTRA} extra tokens.")
+            print(f"  {pad}  Some thinking models never stop reasoning on these prompts (gemma4:26b produced")
+            print(f"  {pad}  52k characters and no answer); those calls are recorded as no_output, not wrong.")
+        elif think:
+            print(f"  {pad}  --think requested, but this model cannot think: it runs with thinking OFF.")
+        elif capable:
+            print(f"  {pad}  runs with thinking OFF (pass --think to turn it on).")
+        print(f"  {pad}  answer reserve = {answer_reserve_for(m, thinking_by_model[m])} tokens"
               + ("" if known else "  (unknown model, using the default; add to ANSWER_RESERVE in rca_lib.py to change)"))
 
     print(f"\n== timing one case ({case}), cold then warm\n")
@@ -215,10 +233,10 @@ def quickstart(models, case="re3ss_carts_f1_1"):
     for m in models:
         ensure_only(m)
         t0 = time.time()
-        r = direct_llm(case, model=m, thinking=False)   # cold: includes loading the model
+        r = direct_llm(case, model=m, thinking=thinking_by_model[m])   # cold: includes loading the model
         cold = time.time() - t0
         t0 = time.time()
-        r = direct_llm(case, model=m, thinking=False)   # warm: what a run actually pays per call
+        r = direct_llm(case, model=m, thinking=thinking_by_model[m])   # warm: what a run actually pays per call
         warm = time.time() - t0
         a = r["meta"]["attempts"][-1]
         timings[m] = warm
@@ -226,7 +244,10 @@ def quickstart(models, case="re3ss_carts_f1_1"):
               f"(prompt {r['meta']['prompt_tokens']} tokens, num_ctx {a['num_ctx']}, answer {r['meta']['answer']})")
         if a.get("fallback"):
             print(f"  {' ' * len(m)}  server compatibility: {a['fallback']}")
-        if r["meta"].get("parse_error"):
+        if r["meta"].get("no_output"):
+            print(f"  {' ' * len(m)}  NO OUTPUT: hit the token limit with empty content "
+                  f"({a['thinking_chars']} thinking chars) - try a larger --think-budget")
+        elif r["meta"].get("parse_error"):
             print(f"  {' ' * len(m)}  could not parse the answer: {r['meta']['parse_error']}")
 
     per_call = sum(timings.values())
@@ -239,7 +260,7 @@ def quickstart(models, case="re3ss_carts_f1_1"):
     print("  TrainTicket cases add ~40 s each of one-off trace parsing, and each model swap costs one load.")
     print("  Prompt sizes vary by case (~700 to ~12k tokens), so a real run will differ from this estimate.")
 
-    ms = " ".join(models)
+    ms = " ".join(models) + think_flags
     print("\n== commands\n")
     print(f"  python run_sample.py --models {ms} --direct plain --direct-only --label direct12")
     print(f"  python run_sample.py --models {ms} --preset50 --direct plain capped roles --direct-only --label direct50")
@@ -267,16 +288,33 @@ def main():
                     help="leave the model loaded at the end (default: unload, freeing VRAM)")
     ap.add_argument("--quickstart", action="store_true",
                     help="check the setup, time one case, print run commands and estimates, then stop")
+    ap.add_argument("--think", action="store_true",
+                    help="turn thinking on for models that have the capability (default off; models without it "
+                         "run with thinking off and their arms are not labelled -think)")
+    ap.add_argument("--think-budget", type=int, metavar="N",
+                    help=f"extra output tokens reserved for thinking (THINKING_EXTRA, default "
+                         f"{rca_lib.THINKING_EXTRA}); needs --think")
     a = ap.parse_args()
+    think_flags = ""
+    if a.think_budget is not None:
+        if not a.think:
+            ap.error("--think-budget needs --think")
+        if a.think_budget <= 0:
+            ap.error("--think-budget must be a positive number of tokens")
+        rca_lib.THINKING_EXTRA = a.think_budget  # read at call time by answer_reserve_for; recorded in metadata
+        think_flags = f" --think --think-budget {a.think_budget}"
+    elif a.think:
+        think_flags = " --think"
     if a.quickstart:
-        quickstart(a.models or [], case=(a.cases or ["re3ss_carts_f1_1"])[0])
+        quickstart(a.models or [], case=(a.cases or ["re3ss_carts_f1_1"])[0], think=a.think,
+                   think_flags=think_flags)
         return
     models = a.models or list(MODELS_DEFAULT)
     cases = a.cases or (SAMPLE50 if a.preset50 else [c for c, _ in SAMPLE12])
     direct = a.direct or (["plain"] if a.direct_only else [])
     run(cases, models, a.label, notes=a.notes, use_llm=not a.no_llm,
         staged=not a.direct_only, direct=direct, keep_warm=a.keep_warm,
-        claude_models=() if a.claude is None else (a.claude or ["opus"]))
+        claude_models=() if a.claude is None else (a.claude or ["opus"]), think=a.think)
 
 
 if __name__ == "__main__":

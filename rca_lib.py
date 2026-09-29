@@ -1119,6 +1119,14 @@ def ollama_chat(model, prompt, num_ctx, thinking=True, num_predict=1024, timeout
                      "gpu_total_MB": gpu_before[2] if gpu_before else None}}
 
 
+def _ran_out(attempts):
+    """The last call hit num_predict (done_reason=length) and returned empty content - typically a thinking
+    model that spent its whole budget reasoning. That is neither a wrong answer nor an abstention: it is
+    recorded as its own outcome (`no_output`) and analyse_run.py reports it separately."""
+    a = attempts[-1] if attempts else {}
+    return a.get("done_reason") == "length" and not a.get("content_chars")
+
+
 def _parse_json_block(text):
     t = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
     i, j = t.find("{"), t.rfind("}")
@@ -1170,6 +1178,8 @@ def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=T
             "service_order": service_order(case, order_seed), "evidence_tokens": count_tokens(evidence, "qwen" if "qwen" in model else "gemma"),
             "prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None,
             "n_attempts": len(attempts)}
+    if data is None and _ran_out(attempts):
+        meta |= {"no_output": True, "no_output_stage": "step1"}
     if data is None:
         empty_s = pd.DataFrame(columns=SYMPTOM_COLS)
         empty_c = pd.DataFrame(columns=CANDIDATE_COLS)
@@ -1535,13 +1545,22 @@ def step2_python(case, step1_result, rule="rule"):
     # re-ranking version would have done, so the decision stays measurable.
     out["would_demote"] = (out.role == "victim") & (~out.topology_only)
     out = out.sort_values("rank")
-    out["source"] = f"{step1_result['meta']['source']}+py2:{rule}"
+    source = f"{step1_result['meta']['source']}+py2:{rule}"
+    out["source"] = source
     return {"candidates": out.reset_index(drop=True), "symptoms": syms,
-            "meta": {"case": case, "source": out.source.iloc[0] if len(out) else f"py2:{rule}",
+            # always the full chain name: an empty step 1 (no output, unparseable) must still be filed under
+            # its own step-1 source, not under a made-up "py2:<rule>" one
+            "meta": {"case": case, "source": source,
                      "step2_version": STEP2_VERSION, "rule": rule, "label_only": True,
                      "step1_source": step1_result["meta"]["source"],
                      "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0,
-                     "wall_s": round(time.time() - t0, 2)}}
+                     "wall_s": round(time.time() - t0, 2), **_upstream_no_output(step1_result)}}
+
+
+def _upstream_no_output(result):
+    """Carry a no_output outcome down the chain: every later step on it has nothing to work from."""
+    m = result["meta"]
+    return {"no_output": True, "no_output_stage": m.get("no_output_stage")} if m.get("no_output") else {}
 
 
 STEP2_INSTRUCTIONS = """A fault started at t=0 in a microservice system. Symptom detection has already run.
@@ -1596,10 +1615,11 @@ def step2_llm(case, step1_result, model="qwen2.5-coder:7b", thinking=False, num_
     n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
     if num_predict is None:
         num_predict = answer_reserve_for(model, thinking)
-    source = f"{step1_result['meta']['source']}+llm2:{model}"
+    source = f"{step1_result['meta']['source']}+llm2:{model}{'-think' if thinking else ''}"
 
     attempts, data, err = [], None, None
-    for _ in range(2):
+    upstream = _upstream_no_output(step1_result)
+    for _ in range(0 if upstream else 2):  # step 1 produced nothing: no candidates to label, skip the call
         r = ollama_chat(model, prompt, num_ctx_for(n_tok, model, thinking), thinking=thinking,
                         num_predict=num_predict, schema=STEP2_SCHEMA)
         attempts.append(r["meta"] | {"thinking_chars": r["thinking_chars"], "content_chars": len(r["content"])})
@@ -1610,7 +1630,10 @@ def step2_llm(case, step1_result, model="qwen2.5-coder:7b", thinking=False, num_
             err = f"{type(e).__name__}: {e}"
     meta = {"case": case, "source": source, "step2_version": STEP2_VERSION, "step1_source": step1_result["meta"]["source"],
             "prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None,
-            "label_only": True, "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0}
+            "label_only": True, "graph_edges": len(graph), "edges_without_case_evidence": int((~graph.per_case_evidence).sum()) if len(graph) else 0,
+            **upstream}
+    if data is None and not upstream and _ran_out(attempts):
+        meta |= {"no_output": True, "no_output_stage": "step2"}
     if data is None:
         return {"candidates": pd.DataFrame(columns=STEP2_CAND_COLS), "symptoms": syms, "meta": meta}
 
@@ -1694,10 +1717,19 @@ def _step3_result(case, source, service, confidence, justification, row=None, ab
     cols = {"case": case, "source": source, "rank": 1, "service": service,
             "reason": justification, "role": getattr(row, "role", "") if row is not None else "",
             "path": getattr(row, "path", "") if row is not None else "", "confidence": confidence}
-    cands = pd.DataFrame([] if abstained else [cols], columns=STEP3_COLS)
+    no_output = bool((extra or {}).get("no_output"))
+    cands = pd.DataFrame([] if abstained or no_output else [cols], columns=STEP3_COLS)
     meta = {"case": case, "source": source, "step3_version": STEP3_VERSION, "answer": service,
             "confidence": confidence, "justification": justification, "abstained": abstained, **(extra or {})}
     return {"candidates": cands, "meta": meta}
+
+
+def _no_output_result(case, source, extra, syms):
+    """A decision that could not be made because a model call (this one or upstream) hit its token limit
+    with empty content. Not scored as wrong and not an abstention - see _ran_out."""
+    extra = {"no_output_stage": "step3", **extra, "no_output": True}
+    why = f"no output: {extra['no_output_stage']} hit the token limit (done_reason=length) with empty content"
+    return {**_step3_result(case, source, None, "none", why, extra=extra), "symptoms": syms}
 
 
 def step3_python(case, step2_result, rule="top1"):
@@ -1706,6 +1738,8 @@ def step3_python(case, step2_result, rule="top1"):
                   records the fallback. Abstains when no candidate has clear evidence."""
     cands, syms = step2_result["candidates"], step2_result["symptoms"]
     source = f"{step2_result['meta']['source']}+py3:{rule}"
+    if step2_result["meta"].get("no_output"):
+        return _no_output_result(case, source, _upstream_no_output(step2_result), syms)
     if not len(cands):
         return {**_step3_result(case, source, None, "none", "no candidates from step 1", abstained=True),
                 "symptoms": syms}
@@ -1769,7 +1803,10 @@ def step3_llm(case, step2_result, model="qwen2.5-coder:7b", thinking=False, num_
     n_tok = count_tokens(prompt, "qwen" if "qwen" in model else "gemma")
     if num_predict is None:
         num_predict = answer_reserve_for(model, thinking)
-    source = f"{step2_result['meta']['source']}+llm3:{model}"
+    source = f"{step2_result['meta']['source']}+llm3:{model}{'-think' if thinking else ''}"
+    if step2_result["meta"].get("no_output"):  # nothing upstream to decide between: skip the call
+        return _no_output_result(case, source, {"prompt_tokens": n_tok, "attempts": [], "parse_error": None,
+                                                **_upstream_no_output(step2_result)}, syms)
 
     attempts, data, err = [], None, None
     for _ in range(2):
@@ -1782,6 +1819,8 @@ def step3_llm(case, step2_result, model="qwen2.5-coder:7b", thinking=False, num_
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
     extra = {"prompt_tokens": n_tok, "attempts": attempts, "parse_error": err if data is None else None}
+    if data is None and _ran_out(attempts):
+        return _no_output_result(case, source, extra, syms)
     if data is None:
         return {**_step3_result(case, source, None, "none", "unparseable answer", abstained=True, extra=extra),
                 "symptoms": syms}
@@ -1887,6 +1926,8 @@ def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts
     extra = {"prompt_tokens": n_tok, "evidence_tokens": count_tokens(evidence, "qwen" if "qwen" in model else "gemma"),
              "attempts": attempts, "parse_error": err if data is None else None, "order_seed": order_seed}
     empty = pd.DataFrame(columns=SYMPTOM_COLS)
+    if data is None and _ran_out(attempts):
+        return _no_output_result(case, source, extra | {"no_output_stage": "direct"}, empty)
     if data is None:
         return {**_step3_result(case, source, None, "none", "unparseable answer", abstained=True, extra=extra),
                 "symptoms": empty}
@@ -2164,6 +2205,7 @@ class RunWriter:
             "truth": facts["truth"], "stage": stage, "arm": source,
             "answer": answer, "correct": bool(answer and is_correct(answer, facts["truth"])),
             "abstained": bool(meta.get("abstained", False)), "confidence": meta.get("confidence", ""),
+            "no_output": bool(meta.get("no_output", False)),
             "rank_of_truth": rank,
             "reason_for_answer": meta.get("justification", cands.reason.iloc[0] if len(cands) else ""),
             "reason_for_truth": (truth_row.reason.iloc[0] if len(truth_row) else ""),
