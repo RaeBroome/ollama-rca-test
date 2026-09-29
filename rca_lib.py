@@ -1149,11 +1149,11 @@ STEP1_SCHEMA = {  # Ollama structured output, so a malformed number can't cost a
 }
 
 
-def step1_llm(case, model="qwen2.5-coder:7b", thinking=True, include_artifacts=True, max_pat_rows=None,
+def step1_llm(case, model="gemma4:26b", thinking=False, include_artifacts=True, max_pat_rows=None,
               num_predict=None, schema=STEP1_SCHEMA, order_seed=DEFAULT_ORDER_SEED):
     """LLM symptom detection on the step-0 text. Same output shape as step1_python.
     Services are validated against the case's own service list; invented names are recorded, not silently kept."""
-    thinking = thinking and model_supports_thinking(model)  # qwen2.5-coder has no thinking capability
+    thinking = thinking and model_supports_thinking(model)  # a model without the capability runs without
     evidence = render_step0(case, include_artifacts=include_artifacts, max_pat_rows=max_pat_rows,
                             order_seed=order_seed)
     prompt = STEP1_INSTRUCTIONS + evidence
@@ -1600,7 +1600,7 @@ STEP2_SCHEMA = {
 }
 
 
-def step2_llm(case, step1_result, model="qwen2.5-coder:7b", thinking=False, num_predict=None):
+def step2_llm(case, step1_result, model="gemma4:26b", thinking=False, num_predict=None):
     """Same inputs as step2_python (step 1 output + dependency block only), same output shape."""
     cands, syms = step1_result["candidates"], step1_result["symptoms"]
     graph, excl = case_call_graph(case)
@@ -1785,7 +1785,7 @@ STEP3_SCHEMA = {"type": "object",
                 "required": ["answer", "confidence", "justification"]}
 
 
-def step3_llm(case, step2_result, model="qwen2.5-coder:7b", thinking=False, num_predict=None):
+def step3_llm(case, step2_result, model="gemma4:26b", thinking=False, num_predict=None):
     """Same input as step3_python. Abstention ("none") is allowed and recorded, never scored as a wrong answer."""
     cands, syms = step2_result["candidates"], step2_result["symptoms"]
     thinking = thinking and model_supports_thinking(model)
@@ -1877,7 +1877,7 @@ DIRECT_SCHEMA = {
 }
 
 
-def direct_llm(case, model="qwen2.5-coder:7b", thinking=False, include_artifacts=True, max_pat_rows=None,
+def direct_llm(case, model="gemma4:26b", thinking=False, include_artifacts=True, max_pat_rows=None,
                num_predict=None, order_seed=DEFAULT_ORDER_SEED, roles_from=None, graph_facts=False,
                variant=""):
     """One call: step-0 evidence in, final answer out. Same output shape as step3_*.
