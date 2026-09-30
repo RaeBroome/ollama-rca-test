@@ -10,16 +10,24 @@ limit and returned nothing. Does that apply to other models, and was it a budget
 
 ## Runs
 
-| test | thinking | num_ctx | num_predict | eval_count | done_reason | answer | wall_s |
-|---|---|---:|---:|---:|---|---|---:|
-| 1 nothink | off | 4,608 | (default) | 175 | stop | carts | 42.7 |
-| 2 think | on | 123,010 | 100,000 | 3,696 | stop | carts | 168.5 |
-| 3 bigctx | on | 123,010 | 8,192 | 3,696 | stop | carts | 169.1 |
+| test | path | thinking | num_ctx | num_predict | eval_count | done_reason | answer | wall_s |
+|---|---|---|---:|---:|---:|---|---|---:|
+| 1 nothink | `direct_llm` | off | 4,608 | (default) | 175 | stop | carts | 42.7 |
+| 2 think | `ollama_chat` | on | 123,010 | 100,000 | 3,696 | stop | carts | 168.5 |
+| 3 bigctx | `ollama_chat` | on | 123,010 | 8,192 | 3,696 | stop | carts | 169.1 |
+| 4 isolated | `direct_llm` | on | 123,010 | 8,192 | 8,192 | length | (none) | 311.5 |
+
+The two paths differ in more than the call:
+
+| | `direct_llm` (tests 1, 4 and the failures) | `ollama_chat` called directly (tests 2-3) |
+|---|---|---|
+| structured output (`format`) | `DIRECT_SCHEMA` | none |
+| service order in the evidence | shuffled, seed 1234 (3,011 tokens) | alphabetical, `render_step0` default (3,010 tokens) |
 
 Tests 2 and 3 produced identical output (13,304 thinking chars, the same 868-char answer), as expected at
 temperature 0: the model stopped at 3,696 tokens, so a num_predict of 8,192 or 100,000 made no difference.
 
-Earlier failures on the same model and case, before the big context:
+Earlier failures on the same model and case, all through `direct_llm`:
 
 | num_ctx | num_predict | thinking chars | content | done_reason |
 |---:|---:|---:|---:|---|
@@ -33,50 +41,52 @@ The first two are the two attempts of `results/20260929-122117-glm-think-1` (`ru
 
 ## Finding
 
-num_ctx looks like the variable, not num_predict. Test 3 succeeded on the same 8,192 budget that failed at
-num_ctx 20,992, converging in 3,696 tokens. All three runs answered `carts`, which is correct.
+**num_ctx is ruled out.** Test 4 went through `direct_llm` itself, so the schema stayed on and services stayed
+shuffled, with only num_ctx raised to tests 2-3's 123,010. It ran away exactly as at 20,992: 32,307 thinking
+chars against 32,305, `done_reason=length`, no answer. The model's behaviour does not depend on the context size.
 
-**Not yet isolated.** The failures and tests 2-3 differ in three ways, not one:
+**Remaining suspects: the JSON schema and the shuffled service order.** Tests 2-3 converged with neither. The
+next test separates them: `direct_llm`'s shuffled prompt with the schema off. If it converges, the schema is the
+cause. If it runs away, the service order is.
 
-| | failures (via `direct_llm`) | tests 2-3 (`ollama_chat` called directly) |
-|---|---|---|
-| num_ctx | 20,992 | 123,010 |
-| structured output (`format`) | `DIRECT_SCHEMA` | none |
-| service order in the evidence | shuffled, seed 1234 (3,011 tokens) | alphabetical, `render_step0` default (3,010 tokens) |
+With thinking off (test 1), the same schema and order gave a correct answer in 175 tokens.
 
-Any of the three could explain the change. Constrained decoding in particular is a plausible cause of a
-thinking model running on. The test that separates them: `direct_llm` itself (schema on, shuffled order) with
-only num_ctx raised to ~123k and num_predict 8,192. If it converges, num_ctx is the variable. If it runs away,
-the schema or the order is.
+## Timing: large contexts spill to CPU
 
-In favour of num_ctx: this repo has seen num_ctx alone change an answer at temperature 0 before (coarse
-context buckets flipped one of 24, see the comment above `num_ctx_for` in `rca_lib.py`).
+The 169 s of tests 2-3 is mostly large-context slowdown, not the cost of thinking. In test 4, GPU memory peaked
+at 19,478 of 20,470 MB (19,173 MB free before the call), so a 123k-token context does not fit on the card next to
+glm-4.7-flash (19.0 GB) and part of it runs on the CPU. Generation ran at ~26 tok/s (8,192 tokens in 311.5 s)
+against ~66 tok/s at num_ctx 20,992 (`glm-think-1`: 17,408 tokens in 262 s). Tests 2-3 generated 3,696 tokens in
+~169 s, about 22 tok/s, which matches the slow rate.
 
-## Timing
+All four times include a cold model load, because each script loads the model and unloads it at the end. So
+169 s against test 1's 43 s is not a measure of what thinking costs. Only test 4 recorded GPU memory.
 
-On this case, thinking took 169 s against 43 s for the same correct answer. That comparison is rough:
+## Notes on the records
 
-- **All three times include a cold model load**, because each script loads the model and unloads it at the end.
-- **GPU memory was not recorded.** `ollama_chat` samples it (`gpu_free_before_MB`), but the scripts did not save
-  it. glm-4.7-flash is 19.0 GB on a 20 GB card, so a 123k-token KV cache probably did not fit on the GPU, and
-  part of the 169 s may be a CPU spill rather than thinking.
-
-## Known issue
-
-`test2_thinking_dump.txt` came out empty despite 13,304 thinking chars, so it was not kept. `r.get("thinking")`
-returns nothing because `ollama_chat` never returns the thinking text. It keeps only its length
-(`thinking_chars`), by design: answers are read from `message.content` only. Saving the reasoning needs either
-a change to `ollama_chat` or a direct `/api/chat` call.
+- **`truncation_ok: false` in test 4 is a false alarm.** The repo counts glm prompts with the gemma tokenizer
+  (3,011 tokens), while glm itself counted 2,655 (`prompt_eval_count`). A 3k-token prompt cannot be truncated in
+  a 123k context.
+- **Test 4 reached num_ctx by replacing `rca_lib.num_ctx_for` inside the script.** `direct_llm` sizes num_ctx
+  itself and has no parameter for it. The script also blocked `direct_llm`'s retry so the test was a single call.
+  Because the retry was blocked there is no `direct_llm` result, so `no_output` is judged on the call itself. The
+  first version of the script read it from the missing result and wrote `false`. It was corrected to `true` from
+  the recorded `done_reason` and `content_chars`, without re-running.
+- **`test2_thinking_dump.txt` came out empty despite 13,304 thinking chars, so it was not kept.**
+  `r.get("thinking")` returns nothing because `ollama_chat` never returns the thinking text. It keeps only its
+  length (`thinking_chars`), by design: answers are read from `message.content` only. Saving the reasoning needs
+  either a change to `ollama_chat` or a direct `/api/chat` call.
 
 ## Still open
 
-- Whether gemma4:26b behaves the same way with a large num_ctx.
+- Schema or service order: the separating test above.
+- Whether gemma4:26b behaves the same way.
 - Whether thinking improves accuracy over 50 cases.
-- The separating test above.
 
 ## Files
 
-`run_test1.py`, `run_test2.py` and `run_test3.py` produced `test1_nothink.json`, `test2_think.json` and
-`test3_bigctx.json`. The scripts were moved here unchanged: they import `rca_lib` and write their JSON to the
-current directory. To re-run one, run it from the repo root with the root on the path, e.g.
-`PYTHONPATH=. python experiments/2026-09-30-thinking-numctx/run_test3.py`. That makes model calls.
+Each `run_testN.py` produced the matching JSON: `test1_nothink.json`, `test2_think.json`, `test3_bigctx.json`,
+`test4_isolated.json`. Scripts 1-3 were moved here unchanged. They import `rca_lib` and write their JSON to the
+current directory. Script 4 writes next to itself. To re-run one, run it from the repo root with the root on the
+path, e.g. `PYTHONPATH=. python experiments/2026-09-30-thinking-numctx/run_test4.py`. Every one of them makes model
+calls.
