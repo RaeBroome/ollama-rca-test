@@ -1,0 +1,11 @@
+{
+  "test": "thinking ON, num_predict=100000",
+  "content": "```json\n{\n  \"answer\": \"carts\",\n  \"confidence\": \"high\",\n  \"justification\": \"The carts service failed to connect to its database, evidenced by java.net.ConnectException, causing a cascade of 500 errors in front-end.\",\n  \"signals\": [\n    {\n      \"service\": \"carts\",\n      \"signal\": \"java.net.ConnectException: Connection refused\",\n      \"kind\": \"log_new\"\n    },\n    {\n      \"service\": \"carts\",\n      \"signal\": \"WARN o.s.web.servlet.PageNotFound: Request method 'POST' not supported\",\n      \"kind\": \"log_new\"\n    },\n    {\n      \"service\": \"front-end\",\n      \"signal\": \"POST /cart status500\",\n      \"kind\": \"rate_change\"\n    },\n    {\n      \"service\": \"carts\",\n      \"signal\": \"INFO w.w.s.cart.cart.CartContentsResource: Adding for user: Cart{id=<v>, customerId=<v>, items=[]}, Item{id=<v>, itemId=<v>, quantity=<n>, unitPric...\",\n      \"kind\": \"rate_change\"\n    }\n  ]\n}\n```",
+  "expected": "carts",
+  "thinking_chars": 13304,
+  "content_chars": 868,
+  "done_reason": "stop",
+  "eval_count": 3696,
+  "num_ctx": 123010,
+  "wall_s": 168.49
+}

@@ -1,0 +1,11 @@
+{
+  "test": "thinking OFF",
+  "answer": "carts",
+  "expected": "carts",
+  "thinking_chars": 0,
+  "content_chars": 728,
+  "done_reason": "stop",
+  "eval_count": 175,
+  "num_ctx": 4608,
+  "wall_s": 42.69
+}
