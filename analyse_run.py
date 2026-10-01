@@ -48,16 +48,17 @@ def main(run):
 
     for status in ["clear", "weak"]:
         sub = s3[s3.status == status] if len(s3) else s3
-        if not len(sub):
+        # a --skip-baseline run has no step-3 rows at all, only the direct arm: report that rather than nothing
+        d = direct[direct.status == status] if len(direct) else direct
+        if not len(sub) and not len(d):
             continue
-        print(f"\n================ {status.upper()} cases ({sub.case.nunique()} cases)")
-        print("--- decider x step-1 source (never pooled across sources)")
-        print(sub.groupby(["step1_source", "decider"]).apply(block, include_groups=False).to_string())
-        if len(direct):
-            d = direct[direct.status == status]
-            if len(d):
-                print("--- direct: step-0 evidence straight to the model, no Python ranking")
-                print(d.groupby("arm").apply(block, include_groups=False).to_string())
+        print(f"\n================ {status.upper()} cases ({(sub if len(sub) else d).case.nunique()} cases)")
+        if len(sub):
+            print("--- decider x step-1 source (never pooled across sources)")
+            print(sub.groupby(["step1_source", "decider"]).apply(block, include_groups=False).to_string())
+        if len(d):
+            print("--- direct: step-0 evidence straight to the model, no Python ranking")
+            print(d.groupby("arm").apply(block, include_groups=False).to_string())
 
     if len(s3):
         print("\n================ vs the control (python:strength + py3:top1), clear cases")
