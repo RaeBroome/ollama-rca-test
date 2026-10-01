@@ -239,6 +239,12 @@ item, whether it survived compression (`retention.parquet`, one row per item wit
   sizes collide.
 - **Temperature 0 is not determinism.** Changing only `num_ctx` flipped one answer of 24. Runtime
   configuration is part of the input.
+- **Step 2's wording changes from run to run.** `case_call_graph` builds its edges from sets, whose order
+  follows Python's per-process string hash (`PYTHONHASHSEED`), and `step2_python` keeps only the first two or
+  three dependencies it finds: `orders -> orders-db -> carts` in one process, `orders -> orders-db -> shipping`
+  in the next. `role` and `would_demote` do not change, but `path` and `direction_evidence` reach the step-3
+  and direct-roles prompts, so those arms are not reproducible even at temperature 0 — a second source of the
+  non-determinism above. Fix: sort the callees in `case_call_graph`.
 - **The Claude arm cannot be pinned to temperature 0** — the CLI exposes no temperature, top-p or seed — and
   it **records no `signals` array**, so its 42/43 has no auditable chain of reasoning
   ([issue #3](https://github.com/RaeBroome/ollama-rca-test/issues/3)).
