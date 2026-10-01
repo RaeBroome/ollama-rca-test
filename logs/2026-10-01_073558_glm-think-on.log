@@ -1,0 +1,77 @@
+============================================================
+RUN 2026-10-01_073558_glm-think-on
+============================================================
+model        glm-4.7-flash
+case         re3ss_carts_f1_1
+num_predict  100000
+thinking     True
+think_budget_chars40000
+git          68778c3 (dirty)
+server log   C:\Users\Shadow\AppData\Local\Ollama\server.log
+
+-- PHASE: setup -----------------------------------------
+07:35:58  run started
+
+-- PHASE: prep ------------------------------------------
+07:35:58  building evidence text (render_step0)...
+  t+0:06  CPU 20%  RAM 6.8G (ollama 0.08G)  VRAM 1.0G  GPU 13%
+07:36:05  evidence built  chars=7762
+07:36:05  counting prompt tokens...
+07:36:07  tokens counted  prompt_tokens=3010 num_ctx=123010
+
+-- PHASE: load ------------------------------------------
+07:36:07  freeing VRAM, unloading other models (ensure_only)...
+  t+0:11  CPU 19%  RAM 7.2G (ollama 0.09G)  VRAM 1.2G  GPU 1%
+  t+0:16  CPU 15%  RAM 8.1G (ollama 0.09G)  VRAM 17.0G  GPU 9%
+  t+0:22  CPU 14%  RAM 8.1G (ollama 0.09G)  VRAM 17.0G  GPU 35%
+  t+0:37  CPU 13%  RAM 8.3G (ollama 0.09G)  VRAM 17.0G  GPU 36%
+  t+0:53  CPU 25%  RAM 7.4G (ollama 0.09G)  VRAM 18.7G  GPU 20%
+  t+1:09  CPU 12%  RAM 7.6G (ollama 0.09G)  VRAM 18.7G  GPU 36%
+  t+1:24  CPU 14%  RAM 7.6G (ollama 0.09G)  VRAM 18.7G  GPU 44%
+  t+1:40  CPU 14%  RAM 8.1G (ollama 0.09G)  VRAM 16.2G  GPU 39%
+  t+1:56  CPU 15%  RAM 8.2G (ollama 0.09G)  VRAM 16.2G  GPU 21%
+  t+2:11  CPU 25%  RAM 7.2G (ollama 0.09G)  VRAM 1.2G  GPU 2%
+  t+2:27  CPU 16%  RAM 8.2G (ollama 0.09G)  VRAM 16.1G  GPU 36%
+  t+2:42  CPU 15%  RAM 8.3G (ollama 0.09G)  VRAM 16.1G  GPU 42%
+07:38:45  other models unloaded
+         ... 18 more samples hidden (full detail in 2026-10-01_073558_glm-think-on.jsonl) ...
+
+-- PHASE: generate --------------------------------------
+07:38:45  streaming request sent (live token counts below)...
+  t+2:47  CPU 23%  RAM 7.0G (ollama 0.09G)  VRAM 1.0G  GPU 4%
+  t+2:53  CPU 30%  RAM 7.2G (ollama 0.09G)  VRAM 1.2G  GPU 4%
+  t+2:58  CPU 25%  RAM 14.3G (ollama 0.09G)  VRAM 12.3G  GPU 21%
+  t+3:13  CPU 13%  RAM 14.4G (ollama 0.09G)  VRAM 12.3G  GPU 39%
+  t+3:29  CPU 11%  RAM 14.3G (ollama 0.09G)  VRAM 12.3G  GPU 12%
+  t+3:45  tok 132     2.3 t/s  CPU 53%  RAM 14.6G (ollama 0.09G)  VRAM 18.9G  GPU 38%
+  t+4:00  tok 614     8.5 t/s  CPU 59%  RAM 14.6G (ollama 0.09G)  VRAM 18.9G  GPU 41%
+  t+4:16  tok 1137    12.8 t/s  CPU 58%  RAM 14.6G (ollama 0.09G)  VRAM 18.9G  GPU 41%
+  t+4:32  tok 1646    15.9 t/s  CPU 60%  RAM 14.6G (ollama 0.09G)  VRAM 18.9G  GPU 37%
+  t+4:47  tok 2187    18.2 t/s  CPU 63%  RAM 14.6G (ollama 0.09G)  VRAM 18.9G  GPU 40%
+  t+5:03  tok 2685    19.8 t/s  CPU 61%  RAM 14.6G (ollama 0.09G)  VRAM 18.9G  GPU 36%
+  t+5:19  tok 3192    21.1 t/s  CPU 61%  RAM 14.5G (ollama 0.09G)  VRAM 18.9G  GPU 40%
+07:41:21  model returned  done_reason=stop eval_count=3696 wall_s=154.91 prompt_eval_count=2654
+         ... 18 more samples hidden (full detail in 2026-10-01_073558_glm-think-on.jsonl) ...
+  !! GPU under 10% in 3 of 30 samples while generating
+
+-- PHASE: wrap ------------------------------------------
+07:41:21  writing result + artifacts...
+07:41:21  unloading model (ollama_unload)...
+  t+5:24  tok 3293    21.3 t/s  CPU 50%  RAM 6.9G (ollama 0.3G)  VRAM 1.0G  GPU 1%
+  t+5:29  tok 3293    21.3 t/s  CPU 21%  RAM 7.4G (ollama 0.09G)  VRAM 18.7G  GPU 8%
+  t+5:34  tok 3293    21.3 t/s  CPU 20%  RAM 7.4G (ollama 0.09G)  VRAM 18.7G  GPU 34%
+07:41:35  done
+
+-- PHASE: done ------------------------------------------
+07:41:35  run finished
+
+-- RESULT -------------------------------------------------
+done_reason  stop
+eval_count   3696
+num_ctx      123010
+wall_s       154.91
+thinking_chars13304
+content_chars868
+answer       ```json {   "answer": "carts",   "confidence": "high",   "justification": "The carts service failed to connect to its database, evidenced by java.net.ConnectException, causing a cascade of 500 errors 
+expected     carts
+elapsed      5:37

@@ -4,3 +4,10 @@ __pycache__/
 
 *-logs.csv
 *-metrics.csv
+
+# runlog.py output: ignored except the logs docs/glm-num_ctx.md cites
+# (logs/* rather than logs/, so the exceptions below can be re-included)
+logs/*
+!logs/2026-10-01_073558_glm-think-on.log
+!logs/2026-10-01_072251_glm-think-on.log
+!logs/2026-10-01_063703_glm-think-on.log

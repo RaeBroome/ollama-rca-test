@@ -1,0 +1,75 @@
+============================================================
+RUN 2026-10-01_072251_glm-think-on
+============================================================
+model        glm-4.7-flash
+case         re3ss_carts_f1_1
+num_predict  100000
+thinking     True
+think_budget_chars40000
+git          68778c3 (dirty)
+server log   C:\Users\Shadow\AppData\Local\Ollama\server.log
+
+-- PHASE: setup -----------------------------------------
+07:22:51  run started
+
+-- PHASE: prep ------------------------------------------
+07:22:51  building evidence text (render_step0)...
+  t+0:06  CPU 19%  RAM 6.6G (ollama 0.08G)  VRAM 1.0G  GPU 14%
+07:22:57  evidence built  chars=7762
+07:22:57  counting prompt tokens...
+07:22:59  tokens counted  prompt_tokens=3010 num_ctx=27010
+
+-- PHASE: load ------------------------------------------
+07:22:59  freeing VRAM, unloading other models (ensure_only)...
+  t+0:11  CPU 18%  RAM 7.0G (ollama 0.09G)  VRAM 1.2G  GPU 1%
+  t+0:16  CPU 15%  RAM 8.0G (ollama 0.09G)  VRAM 16.9G  GPU 20%
+  t+0:22  CPU 12%  RAM 8.0G (ollama 0.09G)  VRAM 16.9G  GPU 32%
+  t+0:37  CPU 14%  RAM 8.2G (ollama 0.09G)  VRAM 17.0G  GPU 21%
+  t+0:53  CPU 25%  RAM 7.3G (ollama 0.09G)  VRAM 18.7G  GPU 43%
+  t+1:08  CPU 13%  RAM 7.5G (ollama 0.09G)  VRAM 18.7G  GPU 33%
+  t+1:24  CPU 14%  RAM 7.5G (ollama 0.09G)  VRAM 18.7G  GPU 38%
+  t+1:40  CPU 11%  RAM 8.0G (ollama 0.09G)  VRAM 16.2G  GPU 20%
+  t+1:55  CPU 15%  RAM 8.2G (ollama 0.09G)  VRAM 16.2G  GPU 38%
+  t+2:11  CPU 24%  RAM 7.1G (ollama 0.09G)  VRAM 1.2G  GPU 1%
+  t+2:26  CPU 14%  RAM 8.1G (ollama 0.09G)  VRAM 16.2G  GPU 32%
+  t+2:42  CPU 13%  RAM 8.3G (ollama 0.09G)  VRAM 16.2G  GPU 43%
+07:25:38  other models unloaded
+         ... 18 more samples hidden (full detail in 2026-10-01_072251_glm-think-on.jsonl) ...
+
+-- PHASE: generate --------------------------------------
+07:25:38  streaming request sent (live token counts below)...
+  t+2:47  CPU 15%  RAM 6.8G (ollama 0.09G)  VRAM 1.0G  GPU 1%
+  t+2:52  CPU 33%  RAM 7.1G (ollama 0.09G)  VRAM 1.2G  GPU 1%
+  t+2:57  CPU 15%  RAM 8.9G (ollama 0.09G)  VRAM 17.4G  GPU 20%
+  t+3:18  CPU 14%  RAM 9.0G (ollama 0.09G)  VRAM 17.4G  GPU 36%
+  t+3:39  tok 305     6.0 t/s  CPU 59%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 65%
+  t+4:00  tok 1578    21.8 t/s  CPU 58%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 67%
+  t+4:21  tok 2863    30.6 t/s  CPU 59%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 68%
+  t+4:42  tok 4108    35.8 t/s  CPU 58%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 66%
+  t+5:03  tok 5287    39.2 t/s  CPU 59%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 69%
+  t+5:23  tok 6506    41.6 t/s  CPU 61%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 69%
+  t+5:44  tok 7714    43.5 t/s  CPU 60%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 67%
+  t+6:05  tok 8851    44.8 t/s  CPU 60%  RAM 9.0G (ollama 0.09G)  VRAM 19.0G  GPU 71%
+07:29:09  model returned  done_reason=think_budget eval_count=None wall_s=210.85 prompt_eval_count=None
+         ... 29 more samples hidden (full detail in 2026-10-01_072251_glm-think-on.jsonl) ...
+  !! GPU under 10% in 3 of 41 samples while generating
+
+-- PHASE: wrap ------------------------------------------
+07:29:09  writing result + artifacts...
+07:29:09  unloading model (ollama_unload)...
+  t+6:21  tok 9582    45.5 t/s  CPU 40%  RAM 7.0G (ollama 0.09G)  VRAM 1.2G  GPU 1%
+07:29:17  done
+
+-- PHASE: done ------------------------------------------
+07:29:17  run finished
+
+-- RESULT -------------------------------------------------
+done_reason  think_budget
+eval_count   None
+num_ctx      27010
+wall_s       210.85
+thinking_chars40003
+content_chars0
+answer       
+expected     carts
+elapsed      6:25
