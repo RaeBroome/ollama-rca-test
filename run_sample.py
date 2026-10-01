@@ -144,8 +144,10 @@ def _answered(p, res, secs):
 
 
 def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rule"),
-        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False, claude_models=(), think=False):
-    w = start_run(label, notes=notes or f"{len(cases)} cases, models={models if use_llm else 'none'}")
+        step3_rules=("top1", "role"), staged=True, direct=(), keep_warm=False, claude_models=(), think=False,
+        skip_baseline=False):
+    w = start_run(label, notes=notes or f"{len(cases)} cases, models={models if use_llm else 'none'}"
+                  + (", baseline skipped" if skip_baseline else ""))
     print("run dir:", w.dir, flush=True)  # kept verbatim and first: sweep.py reads the run folder from it
     p = Progress(LOGS_DIR / f"{w.dir.name}.txt")
     p.f.write(f"run dir: {w.dir}\n")
@@ -173,8 +175,30 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
     # inside step1_python (rca_lib keeps no copy), so "Reading data" covers only the file-header summary and the
     # actual load falls under "Finding what changed"; and the onset-ordered step-1 pass under "Ranking
     # suspects" recomputes the symptoms before ranking them, so most of its time is not ranking.
-    p.section(f"Analyzing the data — no GPU, this is the slow part ({n} cases)")
-    for i, case in enumerate(cases, 1):  # always: the control chain (python step 1/2 -> py3:top1) is the baseline every run needs
+    if skip_baseline:
+        # No Python step 1/2/3 records. What remains is the scoring facts every written result needs (clear/weak
+        # status and the retention checklist, which runs step-1 symptom detection for cases without a hand-written
+        # one). Computing them here, cached per case, shows that time as its own stage instead of hiding it inside
+        # the first model answer; the values are the ones w.add would compute anyway. The prompt's compression
+        # (render_step0) happens inside direct_llm, under "Asking the model".
+        p.section(f"Analyzing the data — no GPU, baseline skipped ({n} cases)")
+        for i, case in enumerate(cases, 1):
+            tc = time.time()
+            p.case(i, n, case)
+            try:
+                p.stage("Reading data...")
+                p.line(f"  {data_shape(case)}")
+                p.stage("Finding what changed...")
+                rca_lib._case_facts(case)
+            except BaseException as e:
+                p.bad(f"Failed: {type(e).__name__}: {e}")
+                raise
+            p.ok(f"Done ({time.time() - tc:.1f}s)", time.time() - tc)
+            p.blank()
+        p.line((f"Data analysis complete — {n} cases in {_dur(time.time() - t0)}", "cyan"))
+    else:
+        p.section(f"Analyzing the data — no GPU, this is the slow part ({n} cases)")
+    for i, case in enumerate([] if skip_baseline else cases, 1):  # the control chain (python step 1/2 -> py3:top1) is the baseline
         tc = time.time()
         p.case(i, n, case)
         try:
@@ -192,7 +216,8 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
             raise
         p.ok(f"Done ({time.time() - tc:.1f}s)", time.time() - tc)
         p.blank()
-    p.line((f"Data analysis complete — {n} cases in {_dur(time.time() - t0)}", "cyan"))
+    if not skip_baseline:
+        p.line((f"Data analysis complete — {n} cases in {_dur(time.time() - t0)}", "cyan"))
 
     # ---- one model resident at a time: its step 1, step 2 and step 3 for every chain it touches
     if use_llm:
@@ -282,13 +307,17 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                            ((f" ERROR {a['error']}", "red") if a.get("error") else ""))
 
     # ---- Python step 3 on every chain (free)
-    p.section("Deciding with the Python rules (step 3, every chain)")
-    tq = time.time()
-    for (case, chain), r2 in list(s2.items()):  # includes the control chain whenever Python step 1/2 ran
-        for rule in step3_rules:
-            r3 = step3_python(case, r2, rule=rule)
-            w.add(case, "step3", r3["meta"]["source"], r3)
-    p.ok(f"Done ({time.time() - tq:.1f}s)")
+    if skip_baseline:
+        p.blank()
+        p.line(("Python step 3 skipped — there is no baseline chain to decide on (--skip-baseline)", "grey"))
+    else:
+        p.section("Deciding with the Python rules (step 3, every chain)")
+        tq = time.time()
+        for (case, chain), r2 in list(s2.items()):  # includes the control chain whenever Python step 1/2 ran
+            for rule in step3_rules:
+                r3 = step3_python(case, r2, rule=rule)
+                w.add(case, "step3", r3["meta"]["source"], r3)
+        p.ok(f"Done ({time.time() - tq:.1f}s)")
 
     if use_llm and not keep_warm:
         # Free the VRAM instead of leaving the last model resident until Ollama times it out. --keep-warm
@@ -299,6 +328,9 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
     summary = w.finalize(extra_meta={"cases": list(cases), "models": models if use_llm else [],
                                      "use_llm": use_llm, "command": "run_sample.py", "keep_warm": keep_warm,
                                      "think_requested": think, "thinking_by_model": thinking_by_model,
+                                     # a skipped baseline means no Python step 1/2/3 records and no control chain:
+                                     # this folder is not a full run and cannot be compared against its own control
+                                     "baseline_skipped": skip_baseline,
                                      **({"claude_arm": claude_meta} if claude_meta else {})})
     p.blank()
     p.line((f"Run complete — records: {w.n} | summary rows: {len(summary)} | {_dur(time.time() - t0)}", "cyan"))
@@ -451,7 +483,18 @@ def main():
     ap.add_argument("--think-budget", type=int, metavar="N",
                     help=f"extra output tokens reserved for thinking (THINKING_EXTRA, default "
                          f"{rca_lib.THINKING_EXTRA}); needs --think")
+    ap.add_argument("--skip-baseline", action="store_true",
+                    help="skip the Python step-1/2/3 baseline chain (~36 min for 50 cases) and run only compression "
+                         "-> the direct model arm; needs --direct-only, and not with --direct roles")
     a = ap.parse_args()
+    if a.skip_baseline:  # refuse the combinations that would need the baseline, rather than produce wrong output
+        if not a.direct_only:
+            ap.error("--skip-baseline needs --direct-only: the staged LLM arms run on the Python step 1 it skips")
+        if "roles" in (a.direct or []):
+            ap.error("--skip-baseline cannot run --direct roles: that variant is built from the Python step-2 "
+                     "output it skips. Drop roles, or drop --skip-baseline")
+        if a.no_llm and a.claude is None:
+            ap.error("--skip-baseline with --no-llm leaves nothing to run")
     think_flags = ""
     if a.think_budget is not None:
         if not a.think:
@@ -471,7 +514,8 @@ def main():
     direct = a.direct or (["plain"] if a.direct_only else [])
     run(cases, models, a.label, notes=a.notes, use_llm=not a.no_llm,
         staged=not a.direct_only, direct=direct, keep_warm=a.keep_warm,
-        claude_models=() if a.claude is None else (a.claude or ["opus"]), think=a.think)
+        claude_models=() if a.claude is None else (a.claude or ["opus"]), think=a.think,
+        skip_baseline=a.skip_baseline)
 
 
 if __name__ == "__main__":
