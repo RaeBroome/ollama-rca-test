@@ -22,6 +22,7 @@ keeps everything produced up to that point.
 import argparse
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -38,13 +39,42 @@ import rca_lib
 # starts, so a slow case visibly sits on the stage it is stuck in, and keeps a plain-text copy in
 # logs/<run folder name>.txt so progress is never only in a terminal or a temp file.
 LOGS_DIR = Path(__file__).resolve().parent / "logs"
+TELEMETRY_INTERVAL_S = 30  # one GPU / VRAM / CPU / RAM line this often, through the whole run
 SLOW_S = 20  # a case or a model call slower than this is shown in yellow
 SYSTEMS = {"ob": "Online Boutique", "ss": "Sock Shop", "tt": "Train Ticket — slower"}
 _ANSI = {"cyan": "36", "grey": "90", "green": "32", "yellow": "33", "red": "31"}
 
 
+class _WholeLines:
+    """sys.stdout that only ever writes complete lines, each under the shared lock. print() writes the text and
+    the newline separately, so without this a telemetry line from the sampler thread could land between them,
+    inside a line the main thread is printing - rca_lib's own prints included, which bypass Progress."""
+
+    def __init__(self, raw, lock):
+        self._raw, self._lock, self._pending = raw, lock, {}
+
+    def write(self, s):
+        tid = threading.get_ident()
+        buf = self._pending.get(tid, "") + s
+        if "\n" in buf:
+            done, _, buf = buf.rpartition("\n")
+            with self._lock:
+                self._raw.write(done + "\n")
+                self._raw.flush()
+        self._pending[tid] = buf
+        return len(s)
+
+    def flush(self):  # a partial line stays held until its newline: writing it early is what would interleave
+        with self._lock:
+            self._raw.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
 class Progress:
-    """Timestamped lines, coloured on a terminal (NO_COLOR turns it off, FORCE_COLOR on), plain in the log."""
+    """Timestamped lines, coloured on a terminal (NO_COLOR turns it off, FORCE_COLOR on), plain in the log.
+    Safe to call from the telemetry thread: screen and log only ever receive whole lines."""
 
     def __init__(self, log_path):
         self.color = bool(os.environ.get("FORCE_COLOR")) or (sys.stdout.isatty() and not os.environ.get("NO_COLOR"))
@@ -55,6 +85,9 @@ class Progress:
             sys.stdout.reconfigure(errors="replace", **({} if sys.stdout.isatty() else {"encoding": "utf-8"}))
         except Exception:
             pass
+        self.lock = threading.RLock()
+        self._raw_stdout = sys.stdout
+        sys.stdout = _WholeLines(sys.stdout, self.lock)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self.path = log_path
         self.f = open(log_path, "a", encoding="utf-8")
@@ -62,17 +95,25 @@ class Progress:
     def line(self, *parts, stamp=True):
         """parts: plain strings or (text, colour) pairs, so one segment of a line can be coloured."""
         parts = [p if isinstance(p, tuple) else (p, None) for p in parts]
-        head = time.strftime("%H:%M:%S") + "  " if stamp else ""
-        plain = head + "".join(t for t, _ in parts)
-        shown = head + "".join(f"\033[{_ANSI[c]}m{t}\033[0m" if c and self.color else t for t, c in parts)
-        print(shown, flush=True)
-        self.f.write(plain + "\n")
-        self.f.flush()
+        with self.lock:  # stamp inside the lock, so timestamps in the log never run backwards
+            head = time.strftime("%H:%M:%S") + "  " if stamp else ""
+            plain = head + "".join(t for t, _ in parts)
+            shown = head + "".join(f"\033[{_ANSI[c]}m{t}\033[0m" if c and self.color else t for t, c in parts)
+            print(shown, flush=True)
+            self.f.write(plain + "\n")
+            self.f.flush()
 
     def blank(self):
-        print(flush=True)
-        self.f.write("\n")
-        self.f.flush()
+        with self.lock:
+            print(flush=True)
+            self.f.write("\n")
+            self.f.flush()
+
+    def telemetry(self, rec):
+        """One subordinate line from a runlog.py sample: GPU %, VRAM used/total, CPU %, RAM used."""
+        gpu = (f"GPU {rec['gpu_pct']}%  VRAM {rec['vram_used_mb'] / 1000:.1f}/{rec['vram_total_mb'] / 1000:.1f}G"
+               if rec.get("vram_used_mb") is not None else "GPU n/a (no nvidia-smi)")
+        self.line((f"  · {gpu}  CPU {rec['cpu_pct']:.0f}%  RAM {rec['ram_used_gb']}G", "grey"))
 
     def section(self, title):
         self.blank()
@@ -92,7 +133,35 @@ class Progress:
         self.line((f"  {text}", "red"))
 
     def close(self):
-        self.f.close()
+        with self.lock:
+            sys.stdout = self._raw_stdout
+            self.f.close()
+
+
+def start_telemetry(p):
+    """runlog.py's sampler (its thread, nvidia-smi and psutil reads), with each sample sent to the progress log
+    instead of runlog's own logs/<id>.jsonl. None, with a note, when psutil is missing: telemetry is optional."""
+    try:
+        import runlog
+    except ImportError as e:
+        p.line((f"telemetry off: {e} (pip install psutil to turn it on)", "yellow"))
+        return None
+
+    # DEPENDS ON A PRIVATE METHOD: RunLog has no public sampler, and every sample goes out through RunLog._write,
+    # so this overrides it. If runlog.py renames or restructures _write, the samples go back to runlog's own
+    # jsonl and telemetry lines stop appearing here - silently, without breaking the run. Inherited with the
+    # sampler, per sample: a GET /api/ps (5 s timeout) and a process scan, plus one `git` call at start.
+    class Telemetry(runlog.RunLog):
+        def _write(self, rec):  # the only override: where a record goes
+            if rec.get("kind") == "sample":
+                p.telemetry(rec)
+            elif rec.get("kind") == "event" and "sampler error" in str(rec.get("msg")):
+                p.line((f"  · telemetry: {rec['msg']}", "red"))
+
+    t = Telemetry("telemetry", log_dir=str(LOGS_DIR), sample_every=TELEMETRY_INTERVAL_S, echo=False)
+    t.start_sampler()
+    p.line((f"telemetry: every {TELEMETRY_INTERVAL_S}s (runlog.py sampler)", "grey"))
+    return t
 
 
 def _dur(s):
@@ -152,6 +221,7 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
     p = Progress(LOGS_DIR / f"{w.dir.name}.txt")
     p.f.write(f"run dir: {w.dir}\n")
     p.line(f"progress log: {p.path}")
+    tel = start_telemetry(p)  # runs through both phases; a daemon thread, so a crash cannot leave it hanging
     t0 = time.time()
     n = len(cases)
     s1, s2 = {}, {}
@@ -332,6 +402,8 @@ def run(cases, models, label, notes="", use_llm=True, step2_rules=("naive", "rul
                                      # this folder is not a full run and cannot be compared against its own control
                                      "baseline_skipped": skip_baseline,
                                      **({"claude_arm": claude_meta} if claude_meta else {})})
+    if tel:
+        tel.stop_sampler()
     p.blank()
     p.line((f"Run complete — records: {w.n} | summary rows: {len(summary)} | {_dur(time.time() - t0)}", "cyan"))
     p.line(str(w.dir))
