@@ -5,7 +5,7 @@ __pycache__/
 *-logs.csv
 *-metrics.csv
 
-# runlog.py output: ignored except the logs docs/glm-num_ctx.md cites
+# runlog.py output: ignored except the three glm logs cited by experiments/2026-09-30-thinking-numctx/README.md
 # (logs/* rather than logs/, so the exceptions below can be re-included)
 logs/*
 !logs/2026-10-01_073558_glm-think-on.log

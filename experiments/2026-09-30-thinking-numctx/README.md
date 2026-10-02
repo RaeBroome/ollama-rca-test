@@ -42,24 +42,36 @@ The first two are the two attempts of `results/20260929-122117-glm-think-1` (`ru
 
 ## Finding
 
-**num_ctx is ruled out.** Test 4 went through `direct_llm` itself, so the schema stayed on and services stayed
-shuffled, with only num_ctx raised to tests 2-3's 123,010. It ran away exactly as at 20,992: 32,307 thinking
-chars against 32,305, `done_reason=length`, no answer. The model's behaviour does not depend on the context size.
+**num_ctx is not ruled out: the outcome depends on both the prompt and num_ctx.** Test 4 showed only that a
+large num_ctx does not rescue the shuffled seed-1234 prompt. It went through `direct_llm` itself, so the schema
+stayed on and services stayed shuffled, with only num_ctx raised to tests 2-3's 123,010, and it ran away exactly
+as at 20,992: 32,307 thinking chars against 32,305, `done_reason=length`, no answer. For the alphabetical prompt
+with the schema off, num_ctx does change the outcome. At 123,010 glm converged every time, seven runs with
+identical output (13,304 thinking chars, 3,696 tokens, `carts`): tests 2 and 3, and five runs of
+`test_logged.py`. At 27,010 it looped: 40,003 thinking chars and no answer when the 40,000-char guard stopped it.
+And a small context does not cause the runaway by itself either: test 6's seed 3 converged at 20,992. Neither
+the prompt nor num_ctx explains the outcome alone.
+
+The `test_logged.py` runs are kept as logs: `logs/2026-10-01_073558_glm-think-on.log` (123,010, stop) and
+`logs/2026-10-01_072251_glm-think-on.log` (27,010, think_budget). The other four 123,010 logs are git-ignored;
+their results match the kept one exactly. `logs/2026-10-01_063703_glm-think-on.log` (num_ctx 8,704,
+`done_reason=length`) is kept but says nothing about a small context: it generated 87,040 tokens in an
+8,704-token window, so Ollama shifted the context and the model lost earlier text.
 
 **The schema is ruled out too.** Test 5 went through `direct_llm` with the schema dropped and everything else
 as in the third failure (shuffled order, num_ctx 20,992, num_predict 8,192). It still ran away: 31,423 thinking
 chars against 32,305 with the schema, `done_reason=length`, no answer. The schema changed the reasoning a little
 but not the outcome.
 
-**The runaway is prompt-sensitive: one order converged and one ran away.** The only remaining difference between
-test 3 (converged) and test 5 (ran away) is the order of services in the evidence: alphabetical against
-shuffled with seed 1234. That does not make shuffling the cause, or alphabetical order a fix (alphabetical is not
+**The runaway is prompt-sensitive: one order converged and one ran away.** Test 3 (converged) and test 5 (ran
+away) differ in the order of services in the evidence, alphabetical against shuffled with seed 1234, and in
+num_ctx (123,010 against 20,992). That does not make shuffling the cause, or alphabetical order a fix (alphabetical is not
 neutral either, which is why the repo shuffles). At temperature 0, a small change to the prompt is enough to tip
 glm between converging and reasoning to the limit. What matters for using thinking is how often it converges,
 which needs more than one order to measure.
 
-One gap remains: num_ctx was ruled out with the schema on (test 4). An effect of num_ctx only when the schema is
-off (test 3 had both no schema and 123k) is unlikely but untested.
+Whether num_ctx matters with the schema off, which test 4 left open, is answered by the alphabetical runs
+above: it does. Untested: seed 1234 at 123,010 with the schema off, and the alphabetical prompt at 20,992.
 
 With thinking off (test 1), the shuffled order and the schema gave a correct answer in 175 tokens.
 
@@ -97,14 +109,17 @@ All the times include a cold model load, because each script loads the model and
 
 ## Still open
 
-- How often thinking converges across service orders (several shuffle seeds on this case).
+- ~~How often thinking converges across service orders.~~ Answered by test 6 (`test6_seeds.json`): 1 of 5
+  seeds converged (seed 3) at num_ctx 20,992 with the schema off; seeds 1, 2, 4 and 5 reasoned to the 8,192-token
+  limit with no answer. One case only, so this is not a convergence rate for thinking in general.
 - Whether gemma4:26b behaves the same way.
 - Whether thinking improves accuracy over 50 cases.
 
 ## Files
 
 Each `run_testN.py` produced the matching JSON: `test1_nothink.json`, `test2_think.json`, `test3_bigctx.json`,
-`test4_isolated.json`, `test5_noschema.json`. Scripts 1-3 were moved here unchanged. They import `rca_lib` and
-write their JSON to the current directory. Scripts 4 and 5 write next to themselves. To re-run one, run it from the repo root with the root on the
+`test4_isolated.json`, `test5_noschema.json`, `test6_seeds.json`. Scripts 1-3 were moved here unchanged. They
+import `rca_lib` and write their JSON to the current directory. Scripts 4-6 write next to themselves. The three
+`logs/` files cited above came from `test_logged.py` in the repo root. To re-run one, run it from the repo root with the root on the
 path, e.g. `PYTHONPATH=. python experiments/2026-09-30-thinking-numctx/run_test4.py`. Every one of them makes model
 calls.
