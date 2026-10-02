@@ -6,6 +6,7 @@ RCAEval-data/ is read-only. Nothing in this module writes files.
 CLI:  python rca_lib.py inspect <case> [--no-artifacts] [--max-pat-rows N]
 """
 import csv
+import hashlib
 import json
 import os
 import re
@@ -617,8 +618,63 @@ def service_order(case, seed=None):
     return shuffled
 
 
+# ---- on-disk cache for the step-0 text
+# The evidence depends on the case and render_step0's arguments, never on the model, so comparing models
+# recomputed identical text once per model. Entries are machine-local derived data (git-ignored), one file per
+# key, and the cache is an optimisation only: any cache error falls back to computing.
+STEP0_CACHE_DIR = Path(__file__).resolve().parent / "results" / ".cache"
+
+
+@lru_cache(maxsize=1)
+def _code_fingerprint():
+    """sha256 of this file. STEP0_VERSION cannot be the only guard: it has read "step0-v0.2" since the first
+    commit while step-0 code changed several times (232007a's log templating moved qwen's step-1 recall). So any
+    edit to rca_lib.py retires every entry - a recompute, never stale evidence."""
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def _step0_cache_key(case, args):
+    """Everything the text depends on: case, every argument, STEP0_VERSION, the code, and the identity (size,
+    mtime) of the files it reads - the case index and the case's metrics, logs and inject time. Not the model."""
+    files = [Path(DATA_DIR) / "cases.parquet"] + [Path(DATA_DIR) / case / f for f in
+                                                  ("metrics.parquet", "logs.parquet", "inject_time.txt")]
+    data = [[f.name, s.st_size, s.st_mtime_ns] for f in files if f.exists() for s in [f.stat()]]
+    payload = {"case": case, "args": args, "step0_version": STEP0_VERSION, "code": _code_fingerprint(),
+               "data": data}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def render_step0(case, include_artifacts=True, max_pat_rows=None, examples_per_group=5, tmpl_chars=150,
                  order_seed=None):
+    """_render_step0_uncached through the on-disk cache (STEP0_CACHE_DIR): same arguments, byte-identical text.
+    Entries are written to a temp file in the same directory and renamed into place, so a complete entry is the
+    only kind that can exist; an unreadable one is treated as a miss and recomputed."""
+    args = {"include_artifacts": include_artifacts, "max_pat_rows": max_pat_rows,
+            "examples_per_group": examples_per_group, "tmpl_chars": tmpl_chars, "order_seed": order_seed}
+    path = None
+    try:
+        path = STEP0_CACHE_DIR / f"{_step0_cache_key(case, args)}.txt"
+        if path.exists():
+            return path.read_bytes().decode("utf-8")  # bytes, not text mode: a "\r" in a log line must survive
+    except Exception:
+        pass  # a miss: compute below; the write is attempted if a path was worked out
+    text = _render_step0_uncached(case, **args)  # outside the try: a real error in step 0 must still surface
+    if path is not None:
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp")
+        try:
+            STEP0_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp.write_bytes(text.encode("utf-8"))
+            os.replace(tmp, path)  # atomic within one directory
+        except Exception:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+    return text
+
+
+def _render_step0_uncached(case, include_artifacts=True, max_pat_rows=None, examples_per_group=5, tmpl_chars=150,
+                           order_seed=None):
     """Ground-truth-blind evidence text. max_pat_rows=None -> unranked, nothing cut (size set by num_ctx).
     With a cap, pattern rows are taken one per service in turn (clear kinds first) and the rest is
     announced on an OMITTED line - never dropped silently.
