@@ -1037,21 +1037,44 @@ def ollama_loaded():
     return [m.get("name") or m.get("model") for m in ps.get("models", []) or []]
 
 
+def _ollama_resident():
+    """Names of the models Ollama has resident, or None when /api/ps cannot be read (unreachable, absent on an
+    old server, or not the expected shape). Unlike ollama_loaded, [] here means the server said "none"."""
+    ps = _ollama_try("/api/ps", timeout=30)
+    if not isinstance(ps, dict) or not isinstance(ps.get("models"), list):
+        return None
+    return [n for n in ((m.get("name") or m.get("model")) for m in ps["models"] if isinstance(m, dict)) if n]
+
+
+def _same_model(a, b):
+    """`glm-4.7-flash` and `glm-4.7-flash:latest` are one model: /api/ps reports the tag, callers often omit it."""
+    return a == b or a == f"{b}:latest" or b == f"{a}:latest"
+
+
 def ensure_only(model, others=None, warn=True):
     """Unload other RESIDENT models before running `model`. This is an OPTIMISATION - it stops a second model
     holding VRAM and slowing the first call - so any failure warns and continues.
 
+    Only models /api/ps reports as resident are touched. Unloading one that is not resident is worse than
+    useless: ollama_unload sends a one-token request, so Ollama loads the model to serve it before dropping it -
+    which, with nothing resident, used to load every installed model in turn (~2 min of GPU churn per run).
+    If /api/ps cannot be read, nothing is unloaded: guessing is what caused that. On a server whose /api/ps
+    under-reports (0.34.2 listed nothing with a model loaded) a resident model may then be left in place, which
+    costs at worst a slower or partly-CPU first call.
+
     Eviction is server-wide: on a shared Ollama this takes the model away from anyone else using it, so each
     eviction is announced rather than done silently."""
-    installed = set(ollama_installed())
-    loaded = set(ollama_loaded())
-    candidates = set(others) if others is not None else (installed | set(MODELS_DEFAULT))
+    resident = _ollama_resident()
+    if resident is None:
+        if warn:
+            print(f"note: could not read which models are resident (/api/ps); unloading nothing before {model}")
+        return True
+    if others is not None:
+        resident = [m for m in resident if any(_same_model(m, o) for o in others)]
     evicted, failed = [], []
-    for m in sorted(candidates):
-        if m == model or m not in installed:
-            continue
-        if loaded and m not in loaded:
-            continue  # not resident (when the server tells us); nothing to evict
+    for m in sorted(set(resident)):
+        if _same_model(m, model):
+            continue  # the target itself, possibly reported with its :latest tag
         (evicted if ollama_unload(m) else failed).append(m)
     if warn and evicted:
         print(f"note: unloaded {', '.join(evicted)} to free VRAM for {model}. On a shared Ollama this "
